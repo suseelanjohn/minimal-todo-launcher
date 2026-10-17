@@ -3,9 +3,12 @@ package com.example.minimallauncher
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Telephony
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -39,9 +42,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -53,7 +58,9 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.UUID
+import kotlin.random.Random
 
+// --- DATA MODELS ---
 data class TodoItem(
     val id: String = UUID.randomUUID().toString(),
     val text: String,
@@ -75,6 +82,11 @@ data class AppInfo(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Force Top Status Bar & Bottom Navigation Bar to 100% Pure Black (#000000)
+        window.statusBarColor = android.graphics.Color.BLACK
+        window.navigationBarColor = android.graphics.Color.BLACK
+
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(
@@ -193,50 +205,58 @@ fun LauncherScreen() {
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                .padding(horizontal = 24.dp, vertical = 20.dp)
+                .padding(horizontal = 22.dp, vertical = 12.dp)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(bottom = 76.dp)
+                    .padding(bottom = 68.dp)
             ) {
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
+                // Top Header: "Today | 17. Oct."
                 Text(
                     text = dateFormatted,
-                    fontSize = 32.sp,
+                    fontSize = 30.sp,
                     fontWeight = FontWeight.Thin,
                     color = Color.White,
                     modifier = Modifier.align(Alignment.CenterHorizontally)
                 )
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
+                // Slim Progress Bar (White Only)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(2.dp)
-                        .background(Color.DarkGray)
+                        .height(1.5.dp)
+                        .background(Color.White.copy(alpha = 0.25f))
                 ) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(dayProgress.coerceIn(0.05f, 1f))
-                            .height(2.dp)
+                            .height(1.5.dp)
                             .background(Color.White)
                     )
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
                     text = "${hoursRemaining}h available",
-                    fontSize = 12.sp,
-                    color = Color.Gray,
+                    fontSize = 11.sp,
+                    color = Color.White.copy(alpha = 0.6f),
                     modifier = Modifier.align(Alignment.CenterHorizontally)
                 )
 
-                Spacer(modifier = Modifier.height(22.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
+                // --- MONOCHROME WHITE WINAMP MUSIC WIDGET ---
+                WinampMusicWidget(context = context)
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Mode Switcher ([ + TASK ] / [ + EVENT ]) & Circular Arrow Button
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -259,10 +279,10 @@ fun LauncherScreen() {
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .size(42.dp)
+                            .size(38.dp)
                             .border(
-                                width = 1.5.dp,
-                                color = Color.White.copy(alpha = 0.6f),
+                                width = 1.2.dp,
+                                color = Color.White,
                                 shape = CircleShape
                             )
                             .clickable {
@@ -274,13 +294,14 @@ fun LauncherScreen() {
                             imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                             contentDescription = "Open App Drawer",
                             tint = Color.White,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
+                // Quick Creation Box (Strict White/Black Theme)
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -292,7 +313,7 @@ fun LauncherScreen() {
                             placeholder = {
                                 Text(
                                     text = if (isAddingEvent) "Add an upcoming event..." else "Add a new task...",
-                                    color = Color.Gray
+                                    color = Color.White.copy(alpha = 0.45f)
                                 )
                             },
                             singleLine = true,
@@ -306,9 +327,9 @@ fun LauncherScreen() {
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedTextColor = Color.White,
                                 unfocusedTextColor = Color.White,
-                                focusedBorderColor = Color(0xFF66BB6A),
-                                unfocusedBorderColor = Color.DarkGray,
-                                cursorColor = Color(0xFF66BB6A)
+                                focusedBorderColor = Color.White,
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.35f),
+                                cursorColor = Color.White
                             )
                         )
                         Spacer(modifier = Modifier.width(8.dp))
@@ -329,7 +350,7 @@ fun LauncherScreen() {
                             placeholder = {
                                 Text(
                                     text = "Date / Time (e.g., Tomorrow · All day)",
-                                    color = Color.Gray,
+                                    color = Color.White.copy(alpha = 0.45f),
                                     fontSize = 13.sp
                                 )
                             },
@@ -342,24 +363,25 @@ fun LauncherScreen() {
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedTextColor = Color.White,
                                 unfocusedTextColor = Color.White,
-                                focusedBorderColor = Color(0xFF66BB6A),
-                                unfocusedBorderColor = Color.DarkGray,
-                                cursorColor = Color(0xFF66BB6A)
+                                focusedBorderColor = Color.White,
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.35f),
+                                cursorColor = Color.White
                             )
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
+                // Unified Scrollable Feed: Today's Tasks + Upcoming Events (Pure White/Gray)
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     item {
                         Text(
                             text = "TODAY'S TASKS",
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             letterSpacing = 1.5.sp,
-                            color = Color.Gray,
-                            modifier = Modifier.padding(vertical = 6.dp)
+                            color = Color.White.copy(alpha = 0.6f),
+                            modifier = Modifier.padding(vertical = 4.dp)
                         )
                     }
 
@@ -367,9 +389,9 @@ fun LauncherScreen() {
                         item {
                             Text(
                                 text = "No tasks for today",
-                                fontSize = 14.sp,
-                                color = Color.DarkGray,
-                                modifier = Modifier.padding(vertical = 8.dp)
+                                fontSize = 13.sp,
+                                color = Color.White.copy(alpha = 0.35f),
+                                modifier = Modifier.padding(vertical = 6.dp)
                             )
                         }
                     }
@@ -398,13 +420,13 @@ fun LauncherScreen() {
                     }
 
                     item {
-                        Spacer(modifier = Modifier.height(18.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
                         Text(
                             text = "UPCOMING EVENTS",
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             letterSpacing = 1.5.sp,
-                            color = Color.Gray,
-                            modifier = Modifier.padding(vertical = 6.dp)
+                            color = Color.White.copy(alpha = 0.6f),
+                            modifier = Modifier.padding(vertical = 4.dp)
                         )
                     }
 
@@ -412,9 +434,9 @@ fun LauncherScreen() {
                         item {
                             Text(
                                 text = "No upcoming events",
-                                fontSize = 14.sp,
-                                color = Color.DarkGray,
-                                modifier = Modifier.padding(vertical = 8.dp)
+                                fontSize = 13.sp,
+                                color = Color.White.copy(alpha = 0.35f),
+                                modifier = Modifier.padding(vertical = 6.dp)
                             )
                         }
                     }
@@ -449,11 +471,12 @@ fun LauncherScreen() {
                 }
             }
 
+            // Bottom 4-Icon Dock
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -472,9 +495,9 @@ fun LauncherScreen() {
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(34.dp)
                         .border(
-                            width = 1.75.dp,
+                            width = 1.5.dp,
                             color = Color.White,
                             shape = RoundedCornerShape(8.dp)
                         )
@@ -497,22 +520,32 @@ fun LauncherScreen() {
                         imageVector = if (customAppPkg == null) Icons.Default.Add else Icons.Default.Star,
                         contentDescription = "Custom Quick App",
                         tint = Color.White,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
         }
     }
 
+    // Edit Dialogs
     if (editingTodo != null) {
         AlertDialog(
             onDismissRequest = { editingTodo = null },
+            containerColor = Color.Black,
+            titleContentColor = Color.White,
+            textContentColor = Color.White,
             title = { Text("Edit Task") },
             text = {
                 OutlinedTextField(
                     value = editTodoText,
                     onValueChange = { editTodoText = it },
-                    singleLine = true
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        focusedBorderColor = Color.White,
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.4f)
+                    )
                 )
             },
             confirmButton = {
@@ -526,12 +559,12 @@ fun LauncherScreen() {
                     }
                     editingTodo = null
                 }) {
-                    Text("Save")
+                    Text("Save", color = Color.White)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { editingTodo = null }) {
-                    Text("Cancel")
+                    Text("Cancel", color = Color.White.copy(alpha = 0.6f))
                 }
             }
         )
@@ -540,21 +573,36 @@ fun LauncherScreen() {
     if (editingEvent != null) {
         AlertDialog(
             onDismissRequest = { editingEvent = null },
+            containerColor = Color.Black,
+            titleContentColor = Color.White,
+            textContentColor = Color.White,
             title = { Text("Edit Event") },
             text = {
                 Column {
                     OutlinedTextField(
                         value = editEventTitle,
                         onValueChange = { editEventTitle = it },
-                        label = { Text("Event Title") },
-                        singleLine = true
+                        label = { Text("Event Title", color = Color.White.copy(alpha = 0.6f)) },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = Color.White,
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.4f)
+                        )
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = editEventDate,
                         onValueChange = { editEventDate = it },
-                        label = { Text("Date / Time") },
-                        singleLine = true
+                        label = { Text("Date / Time", color = Color.White.copy(alpha = 0.6f)) },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = Color.White,
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.4f)
+                        )
                     )
                 }
             },
@@ -574,29 +622,351 @@ fun LauncherScreen() {
                     }
                     editingEvent = null
                 }) {
-                    Text("Save")
+                    Text("Save", color = Color.White)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { editingEvent = null }) {
-                    Text("Cancel")
+                    Text("Cancel", color = Color.White.copy(alpha = 0.6f))
                 }
             }
         )
     }
 }
 
+// --- MONOCHROME WHITE WINAMP STYLE MUSIC WIDGET ---
+@Composable
+fun WinampMusicWidget(context: Context) {
+    val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    var isPlaying by remember { mutableStateOf(audioManager.isMusicActive) }
+    var elapsedSeconds by remember { mutableStateOf(0) }
+    var spectrumBars by remember { mutableStateOf(List(14) { 3 }) }
+    var shuffleOn by remember { mutableStateOf(false) }
+    var repeatOn by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            val active = audioManager.isMusicActive
+            if (active || isPlaying) {
+                elapsedSeconds = (elapsedSeconds + 1) % 3600
+                spectrumBars = List(14) { Random.nextInt(3, 17) }
+            } else {
+                spectrumBars = List(14) { 2 }
+            }
+            delay(500L)
+        }
+    }
+
+    val minutes = (elapsedSeconds / 60).toString().padStart(2, '0')
+    val seconds = (elapsedSeconds % 60).toString().padStart(2, '0')
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.2.dp, Color.White)
+            .background(Color.Black)
+            .padding(6.dp)
+    ) {
+        // 1. Winamp Classic Titlebar
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(3.dp)
+                    .border(0.75.dp, Color.White)
+            )
+            Text(
+                text = " WINAMP ",
+                color = Color.White,
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.5.sp
+            )
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(3.dp)
+                    .border(0.75.dp, Color.White)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // 2. Main Display Area (Left Timer/Visualizer + Right Track Info)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
+        ) {
+            // Left Box: Digital Timer & 14-Bar Spectrum Analyzer
+            Column(
+                modifier = Modifier
+                    .width(98.dp)
+                    .border(1.dp, Color.White.copy(alpha = 0.8f))
+                    .padding(5.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (isPlaying) "▶" else "■",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "$minutes:$seconds",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Monochrome White Spectrum Analyzer Bars
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(18.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    spectrumBars.forEach { barHeight ->
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(barHeight.dp)
+                                .background(Color.White)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
+            // Right Box: Track Marquee, kbps/kHz & Volume/EQ/PL
+            Column(modifier = Modifier.weight(1f)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Color.White.copy(alpha = 0.8f))
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = if (isPlaying) "1. SYSTEM AUDIO - PLAYING" else "1. WINAMP READY - TAP PLAY",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(5.dp))
+
+                // Bitrate / Sample Rate / Stereo Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .border(0.8.dp, Color.White.copy(alpha = 0.7f))
+                                .padding(horizontal = 3.dp, vertical = 1.dp)
+                        ) {
+                            Text("320", color = Color.White, fontSize = 8.sp, fontFamily = FontFamily.Monospace)
+                        }
+                        Text(" kbps  ", color = Color.White, fontSize = 8.sp, fontFamily = FontFamily.Monospace)
+                        Box(
+                            modifier = Modifier
+                                .border(0.8.dp, Color.White.copy(alpha = 0.7f))
+                                .padding(horizontal = 3.dp, vertical = 1.dp)
+                        ) {
+                            Text("44", color = Color.White, fontSize = 8.sp, fontFamily = FontFamily.Monospace)
+                        }
+                        Text(" kHz", color = Color.White, fontSize = 8.sp, fontFamily = FontFamily.Monospace)
+                    }
+                    Text(
+                        text = "stereo",
+                        color = Color.White,
+                        fontSize = 8.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(5.dp))
+
+                // Volume Controls & EQ / PL Buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        WinampMiniButton("- VOL") {
+                            audioManager.adjustStreamVolume(
+                                AudioManager.STREAM_MUSIC,
+                                AudioManager.ADJUST_LOWER,
+                                AudioManager.FLAG_SHOW_UI
+                            )
+                        }
+                        WinampMiniButton("+ VOL") {
+                            audioManager.adjustStreamVolume(
+                                AudioManager.STREAM_MUSIC,
+                                AudioManager.ADJUST_RAISE,
+                                AudioManager.FLAG_SHOW_UI
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        WinampMiniButton("EQ") {}
+                        WinampMiniButton("PL") { openMusicPlayer(context) }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // 3. Classic Seeker Track Bar
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .border(0.8.dp, Color.White.copy(alpha = 0.7f))
+        ) {
+            val pos = ((elapsedSeconds % 180) / 180f).coerceIn(0.05f, 1f)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(pos)
+                    .height(6.dp)
+                    .background(Color.White)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // 4. Bottom Transport Controls: |<  |>  ||  []  >|   ^=   SHUFFLE  R
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                WinampTransportButton("|<") {
+                    sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+                    elapsedSeconds = 0
+                }
+                WinampTransportButton("|>") {
+                    sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_PLAY)
+                    isPlaying = true
+                }
+                WinampTransportButton("||") {
+                    sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_PAUSE)
+                    isPlaying = false
+                }
+                WinampTransportButton("[]") {
+                    sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_STOP)
+                    isPlaying = false
+                    elapsedSeconds = 0
+                }
+                WinampTransportButton(">|") {
+                    sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_NEXT)
+                    elapsedSeconds = 0
+                }
+                Spacer(modifier = Modifier.width(3.dp))
+                WinampTransportButton("^=") {
+                    openMusicPlayer(context)
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                WinampToggleButton("SHUFFLE", shuffleOn) { shuffleOn = !shuffleOn }
+                WinampToggleButton("R", repeatOn) { repeatOn = !repeatOn }
+            }
+        }
+    }
+}
+
+@Composable
+fun WinampTransportButton(label: String, onClick: () -> Unit) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .border(1.dp, Color.White)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 7.dp, vertical = 4.dp)
+    ) {
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+fun WinampToggleButton(label: String, active: Boolean, onClick: () -> Unit) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .border(1.dp, Color.White)
+            .background(if (active) Color.White else Color.Black)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 4.dp)
+    ) {
+        Text(
+            text = label,
+            color = if (active) Color.Black else Color.White,
+            fontSize = 9.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+fun WinampMiniButton(label: String, onClick: () -> Unit) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .border(0.8.dp, Color.White.copy(alpha = 0.8f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 5.dp, vertical = 2.dp)
+    ) {
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 8.sp,
+            fontFamily = FontFamily.Monospace
+        )
+    }
+}
+
+// --- MONOCHROME CHIPS & AGENDA ITEMS (WHITE ONLY) ---
 @Composable
 fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .border(
-                width = 1.dp,
-                color = if (selected) Color(0xFF66BB6A) else Color.DarkGray,
+                width = if (selected) 1.5.dp else 1.dp,
+                color = if (selected) Color.White else Color.White.copy(alpha = 0.35f),
                 shape = RoundedCornerShape(4.dp)
             )
             .background(
-                color = if (selected) Color(0xFF66BB6A).copy(alpha = 0.15f) else Color.Transparent,
+                color = if (selected) Color.White.copy(alpha = 0.15f) else Color.Transparent,
                 shape = RoundedCornerShape(4.dp)
             )
             .clickable(onClick = onClick)
@@ -606,8 +976,8 @@ fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
             text = "+ $label",
             fontSize = 11.sp,
             letterSpacing = 1.2.sp,
-            fontWeight = FontWeight.Medium,
-            color = if (selected) Color(0xFF66BB6A) else Color.Gray
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            color = if (selected) Color.White else Color.White.copy(alpha = 0.5f)
         )
     }
 }
@@ -625,17 +995,18 @@ fun AgendaRowItem(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp)
+            .padding(vertical = 7.dp)
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth()
         ) {
+            // Left Vertical Indicator Bar (Pure White when Active, Dim White when Completed)
             Box(
                 modifier = Modifier
                     .width(3.dp)
-                    .height(38.dp)
-                    .background(if (isDone) Color.DarkGray else Color(0xFF66BB6A))
+                    .height(36.dp)
+                    .background(if (isDone) Color.White.copy(alpha = 0.25f) else Color.White)
             )
 
             Spacer(modifier = Modifier.width(14.dp))
@@ -647,8 +1018,8 @@ fun AgendaRowItem(
             ) {
                 Text(
                     text = title,
-                    color = if (isDone) Color.Gray else Color.White,
-                    fontSize = 17.sp,
+                    color = if (isDone) Color.White.copy(alpha = 0.4f) else Color.White,
+                    fontSize = 16.sp,
                     fontWeight = FontWeight.Normal,
                     style = TextStyle(
                         textDecoration = if (isDone) TextDecoration.LineThrough else TextDecoration.None
@@ -658,14 +1029,15 @@ fun AgendaRowItem(
                 Row {
                     Text(
                         text = subtitleHighlight,
-                        color = if (isDone) Color.DarkGray else Color(0xFF66BB6A),
-                        fontSize = 12.sp
+                        color = if (isDone) Color.White.copy(alpha = 0.35f) else Color.White,
+                        fontSize = 11.5.sp,
+                        fontWeight = if (isDone) FontWeight.Normal else FontWeight.Medium
                     )
                     if (subtitleRest.isNotEmpty()) {
                         Text(
                             text = subtitleRest,
-                            color = Color.Gray,
-                            fontSize = 12.sp
+                            color = Color.White.copy(alpha = 0.5f),
+                            fontSize = 11.5.sp
                         )
                     }
                 }
@@ -673,32 +1045,32 @@ fun AgendaRowItem(
 
             IconButton(
                 onClick = onEdit,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(30.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Edit,
                     contentDescription = "Edit",
-                    tint = Color.Gray,
-                    modifier = Modifier.size(16.dp)
+                    tint = Color.White.copy(alpha = 0.6f),
+                    modifier = Modifier.size(15.dp)
                 )
             }
 
             IconButton(
                 onClick = onDelete,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(30.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Delete,
                     contentDescription = "Delete",
-                    tint = Color.Gray,
-                    modifier = Modifier.size(16.dp)
+                    tint = Color.White.copy(alpha = 0.6f),
+                    modifier = Modifier.size(15.dp)
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(9.dp))
         HorizontalDivider(
-            color = Color.DarkGray.copy(alpha = 0.5f),
+            color = Color.White.copy(alpha = 0.15f),
             thickness = 0.5.dp
         )
     }
@@ -711,7 +1083,7 @@ fun DockIconButton(icon: ImageVector, description: String, onClick: () -> Unit) 
             imageVector = icon,
             contentDescription = description,
             tint = Color.White,
-            modifier = Modifier.size(28.dp)
+            modifier = Modifier.size(26.dp)
         )
     }
 }
@@ -735,7 +1107,7 @@ fun AppDrawerScreen(
             .background(Color.Black)
             .padding(24.dp)
     ) {
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -747,7 +1119,7 @@ fun AppDrawerScreen(
                 placeholder = {
                     Text(
                         text = if (isSelectionMode) "Select quick app..." else "Search apps...",
-                        color = Color.Gray
+                        color = Color.White.copy(alpha = 0.45f)
                     )
                 },
                 singleLine = true,
@@ -756,7 +1128,8 @@ fun AppDrawerScreen(
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White,
                     focusedBorderColor = Color.White,
-                    unfocusedBorderColor = Color.DarkGray
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.4f),
+                    cursorColor = Color.White
                 )
             )
             Spacer(modifier = Modifier.width(8.dp))
@@ -782,6 +1155,24 @@ fun AppDrawerScreen(
             }
         }
     }
+}
+
+// --- MEDIA & SYSTEM HELPERS ---
+fun sendMediaKey(context: Context, keyCode: Int) {
+    val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    val eventTime = SystemClock.uptimeMillis()
+    val downEvent = KeyEvent(eventTime, eventTime, KeyEvent.ACTION_DOWN, keyCode, 0)
+    val upEvent = KeyEvent(eventTime, eventTime, KeyEvent.ACTION_UP, keyCode, 0)
+    audioManager.dispatchMediaKeyEvent(downEvent)
+    audioManager.dispatchMediaKeyEvent(upEvent)
+}
+
+fun openMusicPlayer(context: Context) {
+    val intent = Intent(Intent.ACTION_MAIN).apply {
+        addCategory(Intent.CATEGORY_APP_MUSIC)
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+    }
+    runCatching { context.startActivity(intent) }
 }
 
 fun openDialer(context: Context) {
