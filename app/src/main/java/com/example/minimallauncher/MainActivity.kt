@@ -28,6 +28,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -56,6 +57,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -79,6 +81,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.absoluteValue
 import kotlin.random.Random
 
 // --- DATA MODELS ---
@@ -126,7 +129,7 @@ fun LauncherScreen(activity: Activity) {
     val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("launcher_prefs", Context.MODE_PRIVATE) }
 
-    // Persistent States (Music Player is OFF by default)
+    // Persistent States
     var todos by remember { mutableStateOf(loadTodos(prefs)) }
     var events by remember { mutableStateOf(loadEvents(prefs)) }
     var customAppPkg by remember { mutableStateOf(prefs.getString("custom_app_pkg", null)) }
@@ -137,7 +140,7 @@ fun LauncherScreen(activity: Activity) {
     var isSelectingCustomApp by remember { mutableStateOf(false) }
     var installedApps by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
 
-    // --- WORKED HOURS TRACKER (METHOD 2: TAP TO START/STOP LIVE TIMER + FOCUS AUTO-ADD) ---
+    // --- WORKED HOURS TRACKER ---
     val todayKey = remember { LocalDate.now().toString() }
     var savedWorkSecondsToday by remember {
         mutableLongStateOf(checkAndLoadTodayWorkSeconds(prefs, todayKey))
@@ -167,19 +170,21 @@ fun LauncherScreen(activity: Activity) {
     var editEventTitle by remember { mutableStateOf("") }
     var editEventDate by remember { mutableStateOf("") }
 
-    // --- TAMIL AUDIO NEWS READER (TTS) STATES ---
+    // --- AUDIO NEWS READER (DEFAULT ENGLISH, LONG PRESS FOR LANGUAGE SWITCH) ---
     var isReadingNews by remember { mutableStateOf(false) }
+    var newsLanguageIsTamil by remember { mutableStateOf(prefs.getBoolean("news_lang_tamil", false)) }
     var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
 
-    DisposableEffect(context) {
+    DisposableEffect(context, newsLanguageIsTamil) {
         var engine: TextToSpeech? = null
         engine = TextToSpeech(context) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                val tamilLocale = Locale("ta", "IN")
-                val result = engine?.setLanguage(tamilLocale)
+                val locale = if (newsLanguageIsTamil) Locale("ta", "IN") else Locale.US
+                val result = engine?.setLanguage(locale)
                 if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
                     engine?.language = Locale.getDefault()
                 }
+                engine?.setSpeechRate(0.95f)
                 engine?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {}
                     override fun onDone(utteranceId: String?) {
@@ -209,7 +214,6 @@ fun LauncherScreen(activity: Activity) {
             currentDateTime = LocalDateTime.now()
             val currentDay = LocalDate.now().toString()
             if (prefs.getString("work_date", "") != currentDay) {
-                // Midnight reset
                 savedWorkSecondsToday = 0L
                 prefs.edit()
                     .putString("work_date", currentDay)
@@ -226,7 +230,7 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // 20-Minute Focus Countdown Timer (Also adds every worked second to Today's Worked Hours)
+    // 20-Minute Focus Countdown Timer
     LaunchedEffect(focusedTask) {
         val currentFocus = focusedTask
         if (currentFocus != null) {
@@ -235,7 +239,6 @@ fun LauncherScreen(activity: Activity) {
             while (focusRemainingSeconds > 0 && focusedTask != null) {
                 delay(1000L)
                 focusRemainingSeconds -= 1
-                // Automatically add 1 second to today's worked time
                 savedWorkSecondsToday += 1L
                 prefs.edit().putLong("work_seconds_today", savedWorkSecondsToday).apply()
             }
@@ -267,7 +270,7 @@ fun LauncherScreen(activity: Activity) {
 
     BackHandler(enabled = true) {
         if (focusedTask != null) {
-            // Locked during 20-min Focus Mode
+            // Locked during Focus Mode
         } else if (showDrawer) {
             showDrawer = false
             isSelectingCustomApp = false
@@ -289,14 +292,13 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // --- 1. 20-MINUTE FULL-SCREEN FOCUS MODE (NO MUSIC PLAYER, APPS LOCKED) ---
+    // --- 1. 20-MINUTE FULL-SCREEN FOCUS MODE ---
     if (focusedTask != null) {
         FocusLockScreen(
             task = focusedTask!!,
             remainingSeconds = focusRemainingSeconds,
             onMarkCompleted = {
                 val target = focusedTask!!
-                // Auto-remove completed task from screen
                 todos = todos.filter { it.id != target.id }
                 saveTodos(prefs, todos)
                 runCatching { activity.stopLockTask() }
@@ -330,7 +332,7 @@ fun LauncherScreen(activity: Activity) {
         return
     }
 
-    // --- 3. PURE BLACK HOME SCREEN ---
+    // --- 3. PURE BLACK HOME SCREEN (WITH RIGHT-SWIPE PHONEPE QR SCANNER) ---
     val dateFormatted = remember(currentDateTime) {
         val formatter = DateTimeFormatter.ofPattern("dd. MMM.", Locale.ENGLISH)
         "Today | ${currentDateTime.format(formatter)}"
@@ -346,6 +348,14 @@ fun LauncherScreen(activity: Activity) {
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures { _, dragAmount ->
+                    // Right swipe gesture triggers PhonePe UPI QR scanner intent
+                    if (dragAmount > 50f) {
+                        openPhonePeQrScanner(context)
+                    }
+                }
+            }
             .padding(horizontal = 22.dp, vertical = 12.dp)
     ) {
         Column(
@@ -355,7 +365,6 @@ fun LauncherScreen(activity: Activity) {
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Top Header: "Today | 18. Oct."
             Text(
                 text = dateFormatted,
                 fontSize = 30.sp,
@@ -366,7 +375,6 @@ fun LauncherScreen(activity: Activity) {
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Slim Progress Bar (White Only)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -383,7 +391,6 @@ fun LauncherScreen(activity: Activity) {
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Method 2: Tap "Worked: Xh YYm" to Start / Pause Live Background Work Timer
             Row(
                 modifier = Modifier.align(Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically
@@ -396,7 +403,6 @@ fun LauncherScreen(activity: Activity) {
                     modifier = Modifier
                         .clickable {
                             if (isWorkTimerRunning) {
-                                // Stop timer and save accumulated seconds
                                 val elapsed = ((System.currentTimeMillis() - workTimerStartMs) / 1000L).coerceAtLeast(0L)
                                 savedWorkSecondsToday += elapsed
                                 isWorkTimerRunning = false
@@ -406,7 +412,6 @@ fun LauncherScreen(activity: Activity) {
                                     .putLong("work_timer_start_ms", 0L)
                                     .apply()
                             } else {
-                                // Start live background timer
                                 val nowMs = System.currentTimeMillis()
                                 workTimerStartMs = nowMs
                                 isWorkTimerRunning = true
@@ -424,7 +429,6 @@ fun LauncherScreen(activity: Activity) {
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Mode Switcher ([ + TASK ] / [ + EVENT ]) + (📻) Tamil News Radio + (♪) Music Toggle + (→) App Drawer
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -444,12 +448,10 @@ fun LauncherScreen(activity: Activity) {
                     )
                 }
 
-                // Right-Side Circular Action Buttons: (📻) Tamil Radio News + (♪) Music + (→) App Drawer
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // 1. Circular Radio Button (📻) for Tamil Audio News Reader (No Text Shown)
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
@@ -463,43 +465,41 @@ fun LauncherScreen(activity: Activity) {
                                 color = if (isReadingNews) Color.White.copy(alpha = 0.22f) else Color.Transparent,
                                 shape = CircleShape
                             )
-                            .clickable {
-                                if (isReadingNews) {
-                                    isReadingNews = false
-                                    ttsEngine?.stop()
-                                } else {
-                                    isReadingNews = true
-                                    scope.launch {
-                                        val headlines = fetchTamilNewsHeadlines()
-                                        if (isReadingNews && ttsEngine != null) {
-                                            val tamilLocale = Locale("ta", "IN")
-                                            ttsEngine?.setLanguage(tamilLocale)
-                                            ttsEngine?.speak(
-                                                "இன்றைய முக்கிய செய்திகள்.",
-                                                TextToSpeech.QUEUE_FLUSH,
-                                                null,
-                                                "NEWS_INTRO"
-                                            )
-                                            headlines.forEachIndexed { idx, headline ->
-                                                val uId = if (idx == headlines.lastIndex) "NEWS_END" else "NEWS_$idx"
-                                                ttsEngine?.speak(
-                                                    headline,
-                                                    TextToSpeech.QUEUE_ADD,
-                                                    null,
-                                                    uId
-                                                )
+                            .combinedClickable(
+                                onClick = {
+                                    if (isReadingNews) {
+                                        isReadingNews = false
+                                        ttsEngine?.stop()
+                                    } else {
+                                        isReadingNews = true
+                                        scope.launch {
+                                            val summaries = fetchNewsSummaries(newsLanguageIsTamil)
+                                            if (isReadingNews && ttsEngine != null) {
+                                                val locale = if (newsLanguageIsTamil) Locale("ta", "IN") else Locale.US
+                                                ttsEngine?.setLanguage(locale)
+                                                val intro = if (newsLanguageIsTamil) "இன்றைய முக்கிய செய்திகள்." else "Top news summaries."
+                                                ttsEngine?.speak(intro, TextToSpeech.QUEUE_FLUSH, null, "NEWS_INTRO")
+                                                summaries.forEachIndexed { idx, summary ->
+                                                    val uId = if (idx == summaries.lastIndex) "NEWS_END" else "NEWS_$idx"
+                                                    ttsEngine?.speak(summary, TextToSpeech.QUEUE_ADD, null, uId)
+                                                }
                                             }
                                         }
                                     }
+                                },
+                                onLongClick = {
+                                    newsLanguageIsTamil = !newsLanguageIsTamil
+                                    prefs.edit().putBoolean("news_lang_tamil", newsLanguageIsTamil).apply()
+                                    val toastMsg = if (newsLanguageIsTamil) "Language: தமிழ் (Tamil)" else "Language: English"
+                                    android.widget.Toast.makeText(context, toastMsg, android.widget.Toast.LENGTH_SHORT).show()
                                 }
-                            }
+                            )
                     ) {
                         RadioVectorIcon(
                             tint = if (isReadingNews) Color.White else Color.White.copy(alpha = 0.65f)
                         )
                     }
 
-                    // 2. Circular Music Show/Hide Toggle Button (♪) (Off by default)
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
@@ -525,7 +525,6 @@ fun LauncherScreen(activity: Activity) {
                         )
                     }
 
-                    // 3. Circular App Drawer Arrow Button (→)
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
@@ -552,7 +551,6 @@ fun LauncherScreen(activity: Activity) {
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Quick Creation Box
             Column(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -624,7 +622,6 @@ fun LauncherScreen(activity: Activity) {
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Scrollable Feed: Today's Tasks (Tap = Auto-Remove | Hold = 20m Focus) + Upcoming Events
             LazyColumn(modifier = Modifier.weight(1f)) {
                 item {
                     Text(
@@ -653,12 +650,10 @@ fun LauncherScreen(activity: Activity) {
                         subtitleHighlight = "Today",
                         subtitleRest = "  ·  All day",
                         onTapRemove = {
-                            // Auto-remove completed task from screen immediately
                             todos = todos.filter { it.id != item.id }
                             saveTodos(prefs, todos)
                         },
                         onLongPress = {
-                            // Long press opens 20-minute full-screen Focus Mode
                             focusedTask = item
                         },
                         onEdit = {
@@ -704,7 +699,6 @@ fun LauncherScreen(activity: Activity) {
                         subtitleHighlight = highlight,
                         subtitleRest = rest,
                         onTapRemove = {
-                            // Auto-remove completed event from screen
                             events = events.filter { it.id != event.id }
                             saveEvents(prefs, events)
                         },
@@ -722,14 +716,12 @@ fun LauncherScreen(activity: Activity) {
                 }
             }
 
-            // --- MINIMALIST BOTTOM "MUSICAMP" PLAYER (HIDDEN BY DEFAULT, SHOWN ONLY WHEN ♪ IS PRESSED) ---
             if (showMusicPlayer) {
                 Spacer(modifier = Modifier.height(8.dp))
-                MusicampBottomWidget(context = context)
+                MusicampConnectedWidget(context = context)
             }
         }
 
-        // Bottom 4-Icon Dock
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -784,7 +776,6 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // Edit Task Dialog
     if (editingTodo != null) {
         AlertDialog(
             onDismissRequest = { editingTodo = null },
@@ -827,7 +818,6 @@ fun LauncherScreen(activity: Activity) {
         )
     }
 
-    // Edit Event Dialog
     if (editingEvent != null) {
         AlertDialog(
             onDismissRequest = { editingEvent = null },
@@ -898,7 +888,6 @@ fun RadioVectorIcon(tint: Color) {
     Canvas(modifier = Modifier.size(18.dp)) {
         val w = size.width
         val h = size.height
-        // Antenna line
         drawLine(
             color = tint,
             start = Offset(w * 0.25f, h * 0.35f),
@@ -906,7 +895,6 @@ fun RadioVectorIcon(tint: Color) {
             strokeWidth = 1.6.dp.toPx(),
             cap = StrokeCap.Round
         )
-        // Radio body rectangle
         drawRoundRect(
             color = tint,
             topLeft = Offset(w * 0.1f, h * 0.35f),
@@ -914,14 +902,12 @@ fun RadioVectorIcon(tint: Color) {
             cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
             style = Stroke(width = 1.5.dp.toPx())
         )
-        // Speaker circle inside radio
         drawCircle(
             color = tint,
             radius = w * 0.13f,
             center = Offset(w * 0.33f, h * 0.61f),
             style = Stroke(width = 1.3.dp.toPx())
         )
-        // Tuning lines on right side of radio
         drawLine(
             color = tint,
             start = Offset(w * 0.56f, h * 0.53f),
@@ -1083,60 +1069,14 @@ fun FocusLockScreen(
     }
 }
 
-// --- MINIMALIST BOTTOM "MUSICAMP" WIDGET ---
+// --- ♪ MUSIC AMP WIDGET ---
 @Composable
-fun MusicampBottomWidget(context: Context) {
+fun MusicampConnectedWidget(context: Context) {
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     var isPlaying by remember { mutableStateOf(audioManager.isMusicActive) }
-    var trackTitle by remember { mutableStateOf("TAP HERE TO PICK AUDIO OR PLAY") }
+    var trackTitle by remember { mutableStateOf("TAP TO OPEN MUSIC / APPLE MUSIC") }
     var beatWaveBars by remember { mutableStateOf(List(10) { 3 }) }
     var shuffleOn by remember { mutableStateOf(false) }
-
-    var localPlaylist by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var currentTrackIndex by remember { mutableIntStateOf(0) }
-    val localPlayer = remember { MediaPlayer() }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            runCatching {
-                if (localPlayer.isPlaying) localPlayer.stop()
-                localPlayer.release()
-            }
-        }
-    }
-
-    fun playLocalUri(uri: Uri) {
-        runCatching {
-            localPlayer.reset()
-            localPlayer.setDataSource(context, uri)
-            localPlayer.prepare()
-            localPlayer.start()
-            isPlaying = true
-            trackTitle = getFileNameFromUri(context, uri)
-            localPlayer.setOnCompletionListener {
-                if (localPlaylist.isNotEmpty()) {
-                    currentTrackIndex = if (shuffleOn) {
-                        Random.nextInt(localPlaylist.size)
-                    } else {
-                        (currentTrackIndex + 1) % localPlaylist.size
-                    }
-                    playLocalUri(localPlaylist[currentTrackIndex])
-                } else {
-                    isPlaying = false
-                }
-            }
-        }
-    }
-
-    val audioPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
-        if (uris.isNotEmpty()) {
-            localPlaylist = uris
-            currentTrackIndex = 0
-            playLocalUri(uris[0])
-        }
-    }
 
     DisposableEffect(context) {
         val receiver = object : BroadcastReceiver() {
@@ -1166,12 +1106,12 @@ fun MusicampBottomWidget(context: Context) {
 
     LaunchedEffect(Unit) {
         while (true) {
-            val active = audioManager.isMusicActive || localPlayer.isPlaying
+            val active = audioManager.isMusicActive
             isPlaying = active
             if (active) {
                 beatWaveBars = List(10) { Random.nextInt(4, 21) }
-                if (trackTitle.startsWith("TAP HERE")) {
-                    trackTitle = "1. SYSTEM SOUNDTRACK PLAYING"
+                if (trackTitle.startsWith("TAP TO")) {
+                    trackTitle = "APPLE MUSIC / SPOTIFY ACTIVE"
                 }
             } else {
                 beatWaveBars = List(10) { 3 }
@@ -1198,7 +1138,7 @@ fun MusicampBottomWidget(context: Context) {
                     .border(0.75.dp, Color.White)
             )
             Text(
-                text = " MUSICAMP ",
+                text = " ♪ MUSIC AMP ",
                 color = Color.White,
                 fontSize = 9.5.sp,
                 fontFamily = FontFamily.Monospace,
@@ -1247,7 +1187,7 @@ fun MusicampBottomWidget(context: Context) {
                     .height(26.dp)
                     .border(0.8.dp, Color.White.copy(alpha = 0.65f))
                     .clickable {
-                        audioPicker.launch(arrayOf("audio/*"))
+                        openMusicPlayer(context)
                     }
                     .padding(horizontal = 8.dp)
             ) {
@@ -1272,50 +1212,22 @@ fun MusicampBottomWidget(context: Context) {
             MusicampButton(
                 label = "|<",
                 modifier = Modifier.weight(1f),
-                onClick = {
-                    if (localPlaylist.isNotEmpty()) {
-                        currentTrackIndex = (currentTrackIndex - 1 + localPlaylist.size) % localPlaylist.size
-                        playLocalUri(localPlaylist[currentTrackIndex])
-                    } else {
-                        sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
-                    }
-                }
+                onClick = { sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS) }
             )
 
             MusicampButton(
                 label = if (isPlaying) "||" else "▶",
                 modifier = Modifier.weight(1.25f),
                 onClick = {
-                    if (localPlaylist.isNotEmpty()) {
-                        if (localPlayer.isPlaying) {
-                            localPlayer.pause()
-                            isPlaying = false
-                        } else {
-                            localPlayer.start()
-                            isPlaying = true
-                        }
-                    } else {
-                        sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
-                        isPlaying = !isPlaying
-                    }
+                    sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+                    isPlaying = !isPlaying
                 }
             )
 
             MusicampButton(
                 label = ">|",
                 modifier = Modifier.weight(1f),
-                onClick = {
-                    if (localPlaylist.isNotEmpty()) {
-                        currentTrackIndex = if (shuffleOn) {
-                            Random.nextInt(localPlaylist.size)
-                        } else {
-                            (currentTrackIndex + 1) % localPlaylist.size
-                        }
-                        playLocalUri(localPlaylist[currentTrackIndex])
-                    } else {
-                        sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_NEXT)
-                    }
-                }
+                onClick = { sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_NEXT) }
             )
 
             Box(
@@ -1358,7 +1270,7 @@ fun MusicampButton(label: String, modifier: Modifier = Modifier, onClick: () -> 
     }
 }
 
-// --- MONOCHROME CHIPS & AGENDA ITEMS (AUTO-REMOVES ON TAP) ---
+// --- MONOCHROME CHIPS & AGENDA ITEMS ---
 @Composable
 fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
@@ -1560,11 +1472,12 @@ fun AppDrawerScreen(
     }
 }
 
-// --- LIVE TAMIL NEWS RSS FETCHER (GOOGLE NEWS TAMIL) ---
-suspend fun fetchTamilNewsHeadlines(): List<String> = withContext(Dispatchers.IO) {
-    val headlines = mutableListOf<String>()
+// --- RSS NEWS FETCHER (SHORT SUMMARIES) ---
+suspend fun fetchNewsSummaries(isTamil: Boolean): List<String> = withContext(Dispatchers.IO) {
+    val summaries = mutableListOf<String>()
     runCatching {
-        val url = URL("https://news.google.com/rss?hl=ta&gl=IN&ceid=IN:ta")
+        val rssUrl = if (isTamil) "https://news.google.com/rss?hl=ta&gl=IN&ceid=IN:ta" else "https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en"
+        val url = URL(rssUrl)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 6000
             readTimeout = 6000
@@ -1576,7 +1489,7 @@ suspend fun fetchTamilNewsHeadlines(): List<String> = withContext(Dispatchers.IO
             parser.setInput(input, "UTF-8")
             var eventType = parser.eventType
             var insideItem = false
-            while (eventType != XmlPullParser.END_DOCUMENT && headlines.size < 6) {
+            while (eventType != XmlPullParser.END_DOCUMENT && summaries.size < 5) {
                 if (eventType == XmlPullParser.START_TAG) {
                     if (parser.name.equals("item", ignoreCase = true)) {
                         insideItem = true
@@ -1584,7 +1497,7 @@ suspend fun fetchTamilNewsHeadlines(): List<String> = withContext(Dispatchers.IO
                         val rawTitle = parser.nextText().trim()
                         val cleanTitle = rawTitle.substringBeforeLast(" - ").trim()
                         if (cleanTitle.isNotEmpty()) {
-                            headlines.add(cleanTitle)
+                            summaries.add(cleanTitle)
                         }
                     }
                 } else if (eventType == XmlPullParser.END_TAG && parser.name.equals("item", ignoreCase = true)) {
@@ -1594,14 +1507,14 @@ suspend fun fetchTamilNewsHeadlines(): List<String> = withContext(Dispatchers.IO
             }
         }
     }
-    if (headlines.isEmpty()) {
-        listOf("இணைய இணைப்பு இல்லை. பிறகு முயற்சிக்கவும்.")
+    if (summaries.isEmpty()) {
+        if (isTamil) listOf("செய்திகள் கிடைக்கவில்லை.") else listOf("No news available right now.")
     } else {
-        headlines
+        summaries
     }
 }
 
-// --- WORKED TIME & STORAGE HELPERS ---
+// --- WORKED TIME & SYSTEM HELPERS ---
 fun checkAndLoadTodayWorkSeconds(prefs: SharedPreferences, todayKey: String): Long {
     val savedDate = prefs.getString("work_date", "")
     return if (savedDate != todayKey) {
@@ -1615,17 +1528,15 @@ fun checkAndLoadTodayWorkSeconds(prefs: SharedPreferences, todayKey: String): Lo
     }
 }
 
-fun getFileNameFromUri(context: Context, uri: Uri): String {
-    var name = "LOCAL AUDIO TRACK"
-    runCatching {
-        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (index >= 0) name = cursor.getString(index).substringBeforeLast(".")
-            }
-        }
+fun openPhonePeQrScanner(context: Context) {
+    val intent = context.packageManager.getLaunchIntentForPackage("com.phonepe.app")?.apply {
+        action = Intent.ACTION_VIEW
+        data = Uri.parse("phonepe://pay")
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+    } ?: Intent(Intent.ACTION_VIEW, Uri.parse("upi://pay")).apply {
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK
     }
-    return name
+    runCatching { context.startActivity(intent) }
 }
 
 fun sendMediaKey(context: Context, keyCode: Int) {
@@ -1635,6 +1546,14 @@ fun sendMediaKey(context: Context, keyCode: Int) {
     val upEvent = KeyEvent(eventTime, eventTime, KeyEvent.ACTION_UP, keyCode, 0)
     audioManager.dispatchMediaKeyEvent(downEvent)
     audioManager.dispatchMediaKeyEvent(upEvent)
+}
+
+fun openMusicPlayer(context: Context) {
+    val intent = Intent(Intent.ACTION_MAIN).apply {
+        addCategory(Intent.CATEGORY_APP_MUSIC)
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+    }
+    runCatching { context.startActivity(intent) }
 }
 
 fun openDialer(context: Context) {
@@ -1690,7 +1609,6 @@ fun loadTodos(prefs: SharedPreferences): List<TodoItem> {
         val array = JSONArray(raw)
         for (i in 0 until array.length()) {
             val obj = array.getJSONObject(i)
-            // Automatically skip any old completed tasks from previous versions
             if (!obj.optBoolean("isDone", false)) {
                 result.add(
                     TodoItem(
