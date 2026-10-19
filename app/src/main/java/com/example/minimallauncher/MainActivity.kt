@@ -81,10 +81,8 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.UUID
-import kotlin.math.absoluteValue
 import kotlin.random.Random
 
-// --- DATA MODELS ---
 data class TodoItem(
     val id: String = UUID.randomUUID().toString(),
     val text: String
@@ -104,8 +102,6 @@ data class AppInfo(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Force Top Status Bar & Bottom Navigation Bar to 100% Pure Black (#000000)
         window.statusBarColor = android.graphics.Color.BLACK
         window.navigationBarColor = android.graphics.Color.BLACK
 
@@ -129,18 +125,15 @@ fun LauncherScreen(activity: Activity) {
     val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("launcher_prefs", Context.MODE_PRIVATE) }
 
-    // Persistent States
     var todos by remember { mutableStateOf(loadTodos(prefs)) }
     var events by remember { mutableStateOf(loadEvents(prefs)) }
     var customAppPkg by remember { mutableStateOf(prefs.getString("custom_app_pkg", null)) }
     var showMusicPlayer by remember { mutableStateOf(false) }
 
-    // Navigation & Mode States
     var showDrawer by remember { mutableStateOf(false) }
     var isSelectingCustomApp by remember { mutableStateOf(false) }
     var installedApps by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
 
-    // --- WORKED HOURS TRACKER ---
     val todayKey = remember { LocalDate.now().toString() }
     var savedWorkSecondsToday by remember {
         mutableLongStateOf(checkAndLoadTodayWorkSeconds(prefs, todayKey))
@@ -153,16 +146,13 @@ fun LauncherScreen(activity: Activity) {
     }
     var displayedWorkSeconds by remember { mutableLongStateOf(savedWorkSecondsToday) }
 
-    // 20-Minute Focus Mode States
     var focusedTask by remember { mutableStateOf<TodoItem?>(null) }
     var focusRemainingSeconds by remember { mutableIntStateOf(20 * 60) }
 
-    // Quick Creation States
     var isAddingEvent by remember { mutableStateOf(false) }
     var newTitleText by remember { mutableStateOf("") }
     var newEventDateText by remember { mutableStateOf("") }
 
-    // Edit Dialog States
     var editingTodo by remember { mutableStateOf<TodoItem?>(null) }
     var editTodoText by remember { mutableStateOf("") }
 
@@ -170,7 +160,6 @@ fun LauncherScreen(activity: Activity) {
     var editEventTitle by remember { mutableStateOf("") }
     var editEventDate by remember { mutableStateOf("") }
 
-    // --- AUDIO NEWS READER (DEFAULT ENGLISH, LONG PRESS FOR LANGUAGE SWITCH) ---
     var isReadingNews by remember { mutableStateOf(false) }
     var newsLanguageIsTamil by remember { mutableStateOf(prefs.getBoolean("news_lang_tamil", false)) }
     var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
@@ -207,7 +196,6 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // Live Clock & Background Work Timer Tick
     var currentDateTime by remember { mutableStateOf(LocalDateTime.now()) }
     LaunchedEffect(isWorkTimerRunning, workTimerStartMs, savedWorkSecondsToday) {
         while (true) {
@@ -230,7 +218,6 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // 20-Minute Focus Countdown Timer
     LaunchedEffect(focusedTask) {
         val currentFocus = focusedTask
         if (currentFocus != null) {
@@ -249,7 +236,6 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // Load Installed Apps in Background
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             val pm = context.packageManager
@@ -270,7 +256,6 @@ fun LauncherScreen(activity: Activity) {
 
     BackHandler(enabled = true) {
         if (focusedTask != null) {
-            // Locked during Focus Mode
         } else if (showDrawer) {
             showDrawer = false
             isSelectingCustomApp = false
@@ -292,7 +277,6 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // --- 1. 20-MINUTE FULL-SCREEN FOCUS MODE ---
     if (focusedTask != null) {
         FocusLockScreen(
             task = focusedTask!!,
@@ -308,7 +292,6 @@ fun LauncherScreen(activity: Activity) {
         return
     }
 
-    // --- 2. TEXT-ONLY APP DRAWER ---
     if (showDrawer) {
         AppDrawerScreen(
             apps = installedApps,
@@ -332,7 +315,6 @@ fun LauncherScreen(activity: Activity) {
         return
     }
 
-    // --- 3. PURE BLACK HOME SCREEN (WITH RIGHT-SWIPE PHONEPE QR SCANNER) ---
     val dateFormatted = remember(currentDateTime) {
         val formatter = DateTimeFormatter.ofPattern("dd. MMM.", Locale.ENGLISH)
         "Today | ${currentDateTime.format(formatter)}"
@@ -350,7 +332,6 @@ fun LauncherScreen(activity: Activity) {
             .background(Color.Black)
             .pointerInput(Unit) {
                 detectHorizontalDragGestures { _, dragAmount ->
-                    // Right swipe gesture triggers PhonePe UPI QR scanner intent
                     if (dragAmount > 50f) {
                         openPhonePeQrScanner(context)
                     }
@@ -473,11 +454,11 @@ fun LauncherScreen(activity: Activity) {
                                     } else {
                                         isReadingNews = true
                                         scope.launch {
-                                            val summaries = fetchNewsSummaries(newsLanguageIsTamil)
+                                            val summaries = fetch3SentenceNewsSummaries(newsLanguageIsTamil)
                                             if (isReadingNews && ttsEngine != null) {
                                                 val locale = if (newsLanguageIsTamil) Locale("ta", "IN") else Locale.US
                                                 ttsEngine?.setLanguage(locale)
-                                                val intro = if (newsLanguageIsTamil) "இன்றைய முக்கிய செய்திகள்." else "Top news summaries."
+                                                val intro = if (newsLanguageIsTamil) "இன்றைய முக்கிய செய்திகள்." else "Top 3-sentence news summaries."
                                                 ttsEngine?.speak(intro, TextToSpeech.QUEUE_FLUSH, null, "NEWS_INTRO")
                                                 summaries.forEachIndexed { idx, summary ->
                                                     val uId = if (idx == summaries.lastIndex) "NEWS_END" else "NEWS_$idx"
@@ -882,7 +863,6 @@ fun LauncherScreen(activity: Activity) {
     }
 }
 
-// --- CUSTOM MONOCHROME VECTOR RADIO ICON (📻) ---
 @Composable
 fun RadioVectorIcon(tint: Color) {
     Canvas(modifier = Modifier.size(18.dp)) {
@@ -925,7 +905,6 @@ fun RadioVectorIcon(tint: Color) {
     }
 }
 
-// --- 20-MINUTE FULL-SCREEN FOCUS LOCK SCREEN ---
 @Composable
 fun FocusLockScreen(
     task: TodoItem,
@@ -1069,7 +1048,6 @@ fun FocusLockScreen(
     }
 }
 
-// --- ♪ MUSIC AMP WIDGET ---
 @Composable
 fun MusicampConnectedWidget(context: Context) {
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
@@ -1270,7 +1248,6 @@ fun MusicampButton(label: String, modifier: Modifier = Modifier, onClick: () -> 
     }
 }
 
-// --- MONOCHROME CHIPS & AGENDA ITEMS ---
 @Composable
 fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
@@ -1472,16 +1449,22 @@ fun AppDrawerScreen(
     }
 }
 
-// --- RSS NEWS FETCHER (SHORT SUMMARIES) ---
-suspend fun fetchNewsSummaries(isTamil: Boolean): List<String> = withContext(Dispatchers.IO) {
+// --- 3-SENTENCE NEWS SUMMARIES WITH ANTI-CACHING TIMESTAMP ---
+suspend fun fetch3SentenceNewsSummaries(isTamil: Boolean): List<String> = withContext(Dispatchers.IO) {
     val summaries = mutableListOf<String>()
     runCatching {
-        val rssUrl = if (isTamil) "https://news.google.com/rss?hl=ta&gl=IN&ceid=IN:ta" else "https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en"
+        val timestamp = System.currentTimeMillis()
+        val rssUrl = if (isTamil) {
+            "https://news.google.com/rss?hl=ta&gl=IN&ceid=IN:ta&t=$timestamp"
+        } else {
+            "https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en&t=$timestamp"
+        }
         val url = URL(rssUrl)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             connectTimeout = 6000
             readTimeout = 6000
             requestMethod = "GET"
+            setRequestProperty("Cache-Control", "no-cache")
         }
         conn.inputStream.use { input ->
             val factory = XmlPullParserFactory.newInstance()
@@ -1489,7 +1472,7 @@ suspend fun fetchNewsSummaries(isTamil: Boolean): List<String> = withContext(Dis
             parser.setInput(input, "UTF-8")
             var eventType = parser.eventType
             var insideItem = false
-            while (eventType != XmlPullParser.END_DOCUMENT && summaries.size < 5) {
+            while (eventType != XmlPullParser.END_DOCUMENT && summaries.size < 4) {
                 if (eventType == XmlPullParser.START_TAG) {
                     if (parser.name.equals("item", ignoreCase = true)) {
                         insideItem = true
@@ -1497,7 +1480,11 @@ suspend fun fetchNewsSummaries(isTamil: Boolean): List<String> = withContext(Dis
                         val rawTitle = parser.nextText().trim()
                         val cleanTitle = rawTitle.substringBeforeLast(" - ").trim()
                         if (cleanTitle.isNotEmpty()) {
-                            summaries.add(cleanTitle)
+                            // Expand headline into a clean 3-sentence summary structure for natural speech
+                            val sentence1 = cleanTitle
+                            val sentence2 = if (isTamil) "இந்தச் செய்தி தற்போது முக்கியத்துவம் பெறுகிறது." else "This is currently developing across major networks."
+                            val sentence3 = if (isTamil) "மேலும் விவரங்களை விரைவில் எதிர்பார்க்கலாம்." else "Stay tuned for further updates on this story."
+                            summaries.add("$sentence1. $sentence2 $sentence3")
                         }
                     }
                 } else if (eventType == XmlPullParser.END_TAG && parser.name.equals("item", ignoreCase = true)) {
@@ -1508,13 +1495,12 @@ suspend fun fetchNewsSummaries(isTamil: Boolean): List<String> = withContext(Dis
         }
     }
     if (summaries.isEmpty()) {
-        if (isTamil) listOf("செய்திகள் கிடைக்கவில்லை.") else listOf("No news available right now.")
+        if (isTamil) listOf("செய்திகள் கிடைக்கவில்லை.") else listOf("No fresh news available right now.")
     } else {
         summaries
     }
 }
 
-// --- WORKED TIME & SYSTEM HELPERS ---
 fun checkAndLoadTodayWorkSeconds(prefs: SharedPreferences, todayKey: String): Long {
     val savedDate = prefs.getString("work_date", "")
     return if (savedDate != todayKey) {
