@@ -18,6 +18,22 @@ import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -25,13 +41,13 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
@@ -47,6 +63,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -58,7 +77,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -84,15 +102,18 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import kotlin.random.Random
 
-// --- DATA MODELS & DEFAULTS ---
-val DEFAULT_CATEGORIES = listOf("Core/Client", "Admin", "Research", "Growth/Meetings")
 val PLANNED_MINUTES_OPTIONS = listOf(20, 30, 60, 120)
 val BLOCKER_OPTIONS = listOf("None", "Waiting Approval", "Unclear Next Step", "Deprioritized")
+
+data class UserCategory(
+    val name: String,
+    val isHighImpact: Boolean = true
+)
 
 data class TodoItem(
     val id: String = UUID.randomUUID().toString(),
     val text: String,
-    val category: String = "Core/Client",
+    val category: String,
     val plannedMinutes: Int = 30,
     val blocker: String = "None",
     val createdAtMs: Long = System.currentTimeMillis(),
@@ -102,12 +123,19 @@ data class TodoItem(
 data class EventItem(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
-    val dateTimeText: String = "Tomorrow  ·  All day"
+    val dateTimeText: String = "Tomorrow · All day"
 )
 
 data class AppInfo(
     val label: String,
     val packageName: String
+)
+
+data class WellnessPopupData(
+    val type: String,
+    val title: String,
+    val subtitle: String,
+    val bullets: List<String>
 )
 
 class MainActivity : ComponentActivity() {
@@ -134,33 +162,30 @@ class MainActivity : ComponentActivity() {
 fun LauncherScreen(activity: Activity) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val prefs = remember { context.getSharedPreferences("launcher_prefs", Context.MODE_PRIVATE) }
+    val prefs = remember { context.getSharedPreferences("launcher_prefs_v3", Context.MODE_PRIVATE) }
 
-    // Persistent User Categories + Tasks + Events
-    var categories by remember { mutableStateOf(loadUserCategories(prefs)) }
+    var userCategories by remember { mutableStateOf(loadUserCategories(prefs)) }
     var todos by remember { mutableStateOf(loadTodos(prefs, "saved_todos")) }
     var completedTodos by remember { mutableStateOf(loadTodos(prefs, "completed_todos")) }
     var events by remember { mutableStateOf(loadEvents(prefs)) }
     var customAppPkg by remember { mutableStateOf(prefs.getString("custom_app_pkg", null)) }
     var showMusicPlayer by remember { mutableStateOf(false) }
 
-    // Active Current Job State
     var currentJobId by remember { mutableStateOf(prefs.getString("current_job_id", null)) }
     val activeJobItem = remember(todos, currentJobId) {
-        todos.find { it.id == currentJobId } ?: todos.firstOrNull()
+        todos.find { it.id == currentJobId }
     }
 
-    // Modal & Navigation States
     var showDrawer by remember { mutableStateOf(false) }
     var isSelectingCustomApp by remember { mutableStateOf(false) }
     var showCompletedModal by remember { mutableStateOf(false) }
     var showAnalyticsModal by remember { mutableStateOf(false) }
-    var showWellnessModal by remember { mutableStateOf(false) }
+    var showNewItemModal by remember { mutableStateOf(false) }
     var showAddCategoryDialog by remember { mutableStateOf(false) }
     var newCategoryName by remember { mutableStateOf("") }
+    var newCategoryHighImpact by remember { mutableStateOf(true) }
     var installedApps by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
 
-    // --- WORKED HOURS TRACKER & HYDRATION REMINDER ---
     val todayKey = remember { LocalDate.now().toString() }
     var savedWorkSecondsToday by remember {
         mutableLongStateOf(checkAndLoadTodayWorkSeconds(prefs, todayKey))
@@ -173,30 +198,46 @@ fun LauncherScreen(activity: Activity) {
     }
     var displayedWorkSeconds by remember { mutableLongStateOf(savedWorkSecondsToday) }
 
-    // Hydration Tracking (Water intake count & 45-min active work reminder)
-    var waterGlassesToday by remember {
-        mutableIntStateOf(prefs.getInt("water_count_$todayKey", 0))
-    }
-    var lastWaterReminderWorkSec by remember {
-        mutableLongStateOf(prefs.getLong("last_water_sec_$todayKey", 0L))
-    }
-    val isWaterDue = (displayedWorkSeconds - lastWaterReminderWorkSec) >= (45 * 60L)
+    // Smooth Breathing / Blinking Pulse Animation for the Active Working Dot
+    val infiniteTransition = rememberInfiniteTransition(label = "dot_pulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 750, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_alpha"
+    )
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1.15f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 750, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_scale"
+    )
 
-    // 20-Minute Focus Mode States
+    // Continuous Work Session Tracking & Random Pop-Up Trigger (> 20 Mins Continuous Only)
+    var continuousWorkSeconds by remember { mutableLongStateOf(0L) }
+    var nextRandomPopupAtSec by remember {
+        mutableLongStateOf(20 * 60L + Random.nextLong(15, 180))
+    }
+    var activeWellnessPopup by remember { mutableStateOf<WellnessPopupData?>(null) }
+
     var focusedTask by remember { mutableStateOf<TodoItem?>(null) }
     var focusRemainingSeconds by remember { mutableIntStateOf(20 * 60) }
 
-    // Quick Creation States
-    var isAddingEvent by remember { mutableStateOf(false) }
+    var isCreatingEvent by remember { mutableStateOf(false) }
     var newTitleText by remember { mutableStateOf("") }
     var newEventDateText by remember { mutableStateOf("") }
     var selectedCategoryIndex by remember { mutableIntStateOf(0) }
-    var selectedPlannedIndex by remember { mutableIntStateOf(1) } // Default 30m
+    var selectedPlannedIndex by remember { mutableIntStateOf(1) }
 
-    // Edit Dialog States
     var editingTodo by remember { mutableStateOf<TodoItem?>(null) }
     var editTodoText by remember { mutableStateOf("") }
-    var editTodoCategory by remember { mutableStateOf("Core/Client") }
+    var editTodoCategory by remember { mutableStateOf("") }
     var editTodoPlannedMins by remember { mutableIntStateOf(30) }
     var editTodoBlocker by remember { mutableStateOf("None") }
 
@@ -204,7 +245,6 @@ fun LauncherScreen(activity: Activity) {
     var editEventTitle by remember { mutableStateOf("") }
     var editEventDate by remember { mutableStateOf("") }
 
-    // --- AUDIO NEWS READER & NEW NEWS INDICATOR BADGE (•) ---
     var isReadingNews by remember { mutableStateOf(false) }
     var newsLanguageIsTamil by remember { mutableStateOf(prefs.getBoolean("news_lang_tamil", false)) }
     var hasUnheardNews by remember { mutableStateOf(false) }
@@ -242,7 +282,6 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // Background Check for Fresh News Every 10 Minutes
     LaunchedEffect(newsLanguageIsTamil) {
         while (true) {
             val summaries = fetch3SentenceNewsSummaries(newsLanguageIsTamil)
@@ -255,33 +294,52 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // Live Clock & Background Work Timer Tick
     var currentDateTime by remember { mutableStateOf(LocalDateTime.now()) }
-    LaunchedEffect(isWorkTimerRunning, workTimerStartMs, savedWorkSecondsToday) {
+    LaunchedEffect(isWorkTimerRunning, workTimerStartMs, savedWorkSecondsToday, focusedTask) {
         while (true) {
             currentDateTime = LocalDateTime.now()
             val currentDay = LocalDate.now().toString()
             if (prefs.getString("work_date", "") != currentDay) {
                 savedWorkSecondsToday = 0L
-                waterGlassesToday = 0
-                lastWaterReminderWorkSec = 0L
                 prefs.edit()
                     .putString("work_date", currentDay)
                     .putLong("work_seconds_today", 0L)
                     .apply()
             }
+
+            val activelyWorkingNow = isWorkTimerRunning || focusedTask != null
+
             if (isWorkTimerRunning && workTimerStartMs > 0L) {
                 val elapsed = ((System.currentTimeMillis() - workTimerStartMs) / 1000L).coerceAtLeast(0L)
                 displayedWorkSeconds = savedWorkSecondsToday + elapsed
+                continuousWorkSeconds = elapsed
                 saveDailyWorkHistory(prefs, currentDay, displayedWorkSeconds)
+            } else if (focusedTask != null) {
+                displayedWorkSeconds = savedWorkSecondsToday
+                continuousWorkSeconds += 1L
             } else {
                 displayedWorkSeconds = savedWorkSecondsToday
+                continuousWorkSeconds = 0L
+                nextRandomPopupAtSec = 20 * 60L + Random.nextLong(15, 180)
             }
+
+            if (activelyWorkingNow &&
+                continuousWorkSeconds >= (20 * 60L) &&
+                continuousWorkSeconds >= nextRandomPopupAtSec &&
+                activeWellnessPopup == null
+            ) {
+                val taskRef = focusedTask ?: activeJobItem ?: todos.firstOrNull()
+                activeWellnessPopup = generateRandomWellnessPopup(
+                    task = taskRef,
+                    continuousMinutes = (continuousWorkSeconds / 60L).toInt()
+                )
+                nextRandomPopupAtSec = continuousWorkSeconds + Random.nextLong(8 * 60L, 18 * 60L)
+            }
+
             delay(1000L)
         }
     }
 
-    // 20-Minute Focus Countdown Timer
     LaunchedEffect(focusedTask) {
         val currentFocus = focusedTask
         if (currentFocus != null) {
@@ -302,7 +360,6 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // Load Installed Apps in Background
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             val pm = context.packageManager
@@ -323,8 +380,9 @@ fun LauncherScreen(activity: Activity) {
 
     BackHandler(enabled = true) {
         when {
-            focusedTask != null -> { /* Locked during Focus Mode */ }
-            showWellnessModal -> showWellnessModal = false
+            activeWellnessPopup != null -> activeWellnessPopup = null
+            focusedTask != null -> { }
+            showNewItemModal -> showNewItemModal = false
             showAnalyticsModal -> showAnalyticsModal = false
             showCompletedModal -> showCompletedModal = false
             showDrawer -> {
@@ -334,7 +392,6 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // Toggle Work Timer Helper
     val toggleWorkTimer: (Boolean?) -> Unit = { forceState ->
         val targetRun = forceState ?: !isWorkTimerRunning
         if (!targetRun && isWorkTimerRunning) {
@@ -342,6 +399,7 @@ fun LauncherScreen(activity: Activity) {
             savedWorkSecondsToday += elapsed
             isWorkTimerRunning = false
             workTimerStartMs = 0L
+            continuousWorkSeconds = 0L
             val dayStr = LocalDate.now().toString()
             prefs.edit()
                 .putLong("work_seconds_today", savedWorkSecondsToday)
@@ -352,11 +410,16 @@ fun LauncherScreen(activity: Activity) {
             val nowMs = System.currentTimeMillis()
             workTimerStartMs = nowMs
             isWorkTimerRunning = true
+            continuousWorkSeconds = 0L
+            nextRandomPopupAtSec = 20 * 60L + Random.nextLong(15, 180)
+            if (currentJobId == null && todos.isNotEmpty()) {
+                currentJobId = todos.first().id
+                prefs.edit().putString("current_job_id", currentJobId).apply()
+            }
             prefs.edit().putLong("work_timer_start_ms", nowMs).apply()
         }
     }
 
-    // Complete & Archive Task Helper
     val completeAndArchiveTask: (TodoItem) -> Unit = { item ->
         val archived = item.copy(completedAtMs = System.currentTimeMillis())
         todos = todos.filter { it.id != item.id }
@@ -365,741 +428,856 @@ fun LauncherScreen(activity: Activity) {
             val nextJob = todos.firstOrNull()?.id
             currentJobId = nextJob
             prefs.edit().putString("current_job_id", nextJob).apply()
+            if (nextJob == null && isWorkTimerRunning) {
+                toggleWorkTimer(false)
+            }
         }
         saveTodos(prefs, "saved_todos", todos)
         saveTodos(prefs, "completed_todos", completedTodos)
         incrementDailyStat(prefs, "completed_count_${LocalDate.now()}")
     }
 
-    val addCurrentItem = {
-        if (newTitleText.isNotBlank()) {
-            if (isAddingEvent) {
-                val dateLabel = if (newEventDateText.isBlank()) "Upcoming  ·  All day" else newEventDateText.trim()
-                events = listOf(EventItem(title = newTitleText.trim(), dateTimeText = dateLabel)) + events
-                saveEvents(prefs, events)
-                newEventDateText = ""
-            } else {
-                val safeCat = categories.getOrElse(selectedCategoryIndex) { "Core/Client" }
-                val newItem = TodoItem(
-                    text = newTitleText.trim(),
-                    category = safeCat,
-                    plannedMinutes = PLANNED_MINUTES_OPTIONS[selectedPlannedIndex]
+    // Smooth View Transition Between Main Screen and Overlays
+    val activeScreenState = when {
+        focusedTask != null -> "FOCUS"
+        showAnalyticsModal -> "ANALYTICS"
+        showCompletedModal -> "COMPLETED"
+        showDrawer -> "DRAWER"
+        else -> "HOME"
+    }
+
+    AnimatedContent(
+        targetState = activeScreenState,
+        transitionSpec = {
+            fadeIn(animationSpec = tween(220)) togetherWith fadeOut(animationSpec = tween(180))
+        },
+        label = "screen_transition"
+    ) { screen ->
+        when (screen) {
+            "FOCUS" -> {
+                if (focusedTask != null) {
+                    FocusLockScreen(
+                        task = focusedTask!!,
+                        remainingSeconds = focusRemainingSeconds,
+                        pulseAlpha = pulseAlpha,
+                        onMarkCompleted = {
+                            val target = focusedTask!!
+                            completeAndArchiveTask(target)
+                            runCatching { activity.stopLockTask() }
+                            focusedTask = null
+                        }
+                    )
+                }
+            }
+            "ANALYTICS" -> {
+                AnalyticsDashboardScreen(
+                    userCategories = userCategories,
+                    activeTodos = todos,
+                    completedTodos = completedTodos,
+                    workedSecondsToday = displayedWorkSeconds,
+                    prefs = prefs,
+                    onClose = { showAnalyticsModal = false }
                 )
-                todos = listOf(newItem) + todos
-                if (currentJobId == null) {
-                    currentJobId = newItem.id
-                    prefs.edit().putString("current_job_id", newItem.id).apply()
-                }
-                saveTodos(prefs, "saved_todos", todos)
-                incrementDailyStat(prefs, "added_count_${LocalDate.now()}")
             }
-            newTitleText = ""
-        }
-    }
-
-    // --- 1. 20-MINUTE FULL-SCREEN FOCUS MODE ---
-    if (focusedTask != null) {
-        FocusLockScreen(
-            task = focusedTask!!,
-            remainingSeconds = focusRemainingSeconds,
-            onMarkCompleted = {
-                val target = focusedTask!!
-                completeAndArchiveTask(target)
-                runCatching { activity.stopLockTask() }
-                focusedTask = null
+            "COMPLETED" -> {
+                CompletedTasksScreen(
+                    completedTodos = completedTodos,
+                    onRestoreTask = { item ->
+                        completedTodos = completedTodos.filter { it.id != item.id }
+                        todos = listOf(item.copy(completedAtMs = 0L)) + todos
+                        saveTodos(prefs, "completed_todos", completedTodos)
+                        saveTodos(prefs, "saved_todos", todos)
+                    },
+                    onClearAll = {
+                        completedTodos = emptyList()
+                        saveTodos(prefs, "completed_todos", completedTodos)
+                    },
+                    onClose = { showCompletedModal = false }
+                )
             }
-        )
-        return
-    }
-
-    // --- 2. WELLNESS MICRO-BREAK (BREATHING & TASK-BASED WORKOUT) ---
-    if (showWellnessModal) {
-        WellnessBreakScreen(
-            activeJob = activeJobItem,
-            waterGlassesToday = waterGlassesToday,
-            onLogWater = {
-                waterGlassesToday += 1
-                lastWaterReminderWorkSec = displayedWorkSeconds
-                prefs.edit()
-                    .putInt("water_count_$todayKey", waterGlassesToday)
-                    .putLong("last_water_sec_$todayKey", lastWaterReminderWorkSec)
-                    .apply()
-            },
-            onClose = { showWellnessModal = false }
-        )
-        return
-    }
-
-    // --- 3. 4-PILLAR PRODUCTIVITY & SUSTAINABILITY ANALYTICS SCREEN ---
-    if (showAnalyticsModal) {
-        AnalyticsDashboardScreen(
-            categories = categories,
-            activeTodos = todos,
-            completedTodos = completedTodos,
-            workedSecondsToday = displayedWorkSeconds,
-            prefs = prefs,
-            onClose = { showAnalyticsModal = false }
-        )
-        return
-    }
-
-    // --- 4. COMPLETED TASKS ARCHIVE SCREEN ---
-    if (showCompletedModal) {
-        CompletedTasksScreen(
-            completedTodos = completedTodos,
-            onRestoreTask = { item ->
-                completedTodos = completedTodos.filter { it.id != item.id }
-                todos = listOf(item.copy(completedAtMs = 0L)) + todos
-                saveTodos(prefs, "completed_todos", completedTodos)
-                saveTodos(prefs, "saved_todos", todos)
-            },
-            onClearAll = {
-                completedTodos = emptyList()
-                saveTodos(prefs, "completed_todos", completedTodos)
-            },
-            onClose = { showCompletedModal = false }
-        )
-        return
-    }
-
-    // --- 5. TEXT-ONLY APP DRAWER ---
-    if (showDrawer) {
-        AppDrawerScreen(
-            apps = installedApps,
-            isSelectionMode = isSelectingCustomApp,
-            onAppClick = { app ->
-                if (isSelectingCustomApp) {
-                    customAppPkg = app.packageName
-                    prefs.edit().putString("custom_app_pkg", app.packageName).apply()
-                    isSelectingCustomApp = false
-                    showDrawer = false
-                } else {
-                    launchPackage(context, app.packageName)
-                    showDrawer = false
-                }
-            },
-            onClose = {
-                showDrawer = false
-                isSelectingCustomApp = false
-            }
-        )
-        return
-    }
-
-    // --- 6. PURE BLACK HOME SCREEN ---
-    val dateFormatted = remember(currentDateTime) {
-        val formatter = DateTimeFormatter.ofPattern("dd. MMM.", Locale.ENGLISH)
-        "Today | ${currentDateTime.format(formatter)}"
-    }
-
-    // Calculate Daily Productivity Score (0% - 100%)
-    val startOfTodayMs = remember(todayKey) {
-        LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-    }
-    val completedTodayList = remember(completedTodos, startOfTodayMs) {
-        completedTodos.filter { it.completedAtMs >= startOfTodayMs }
-    }
-    val totalTasksToday = completedTodayList.size + todos.size
-    val taskRatio = if (totalTasksToday > 0) {
-        completedTodayList.size.toFloat() / totalTasksToday.toFloat()
-    } else 0f
-
-    val totalPlannedSecondsToday = ((completedTodayList.sumOf { it.plannedMinutes } + todos.sumOf { it.plannedMinutes }).coerceAtLeast(60)) * 60f
-    val workRatio = (displayedWorkSeconds.toFloat() / totalPlannedSecondsToday).coerceIn(0f, 1f)
-
-    val productivityProgress = if (totalTasksToday > 0) {
-        ((taskRatio * 0.6f) + (workRatio * 0.4f)).coerceIn(0f, 1f)
-    } else {
-        (displayedWorkSeconds.toFloat() / (4 * 3600f)).coerceIn(0f, 1f)
-    }
-    val productivityPct = (productivityProgress * 100).roundToInt()
-
-    val workedHours = displayedWorkSeconds / 3600
-    val workedMinutes = (displayedWorkSeconds % 3600) / 60
-    val workedFormatted = String.format(Locale.ENGLISH, "%dh %02dm", workedHours, workedMinutes)
-    val hoursRemaining = (24 - currentDateTime.hour).coerceAtLeast(0)
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .pointerInput(Unit) {
-                detectHorizontalDragGestures { _, dragAmount ->
-                    if (dragAmount > 50f) {
-                        openPhonePeQrScanner(context)
+            "DRAWER" -> {
+                AppDrawerScreen(
+                    apps = installedApps,
+                    isSelectionMode = isSelectingCustomApp,
+                    onAppClick = { app ->
+                        if (isSelectingCustomApp) {
+                            customAppPkg = app.packageName
+                            prefs.edit().putString("custom_app_pkg", app.packageName).apply()
+                            isSelectingCustomApp = false
+                            showDrawer = false
+                        } else {
+                            launchPackage(context, app.packageName)
+                            showDrawer = false
+                        }
+                    },
+                    onClose = {
+                        showDrawer = false
+                        isSelectingCustomApp = false
                     }
-                }
+                )
             }
-            .padding(horizontal = 20.dp, vertical = 10.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(bottom = 60.dp)
-        ) {
-            Spacer(modifier = Modifier.height(4.dp))
+            else -> {
+                val timeFormatted = remember(currentDateTime) {
+                    currentDateTime.format(DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH))
+                }
+                val dateFormatted = remember(currentDateTime) {
+                    val dayName = currentDateTime.format(DateTimeFormatter.ofPattern("EEEE", Locale.ENGLISH))
+                    val dayNum = currentDateTime.dayOfMonth
+                    val suffix = getDayOfMonthSuffix(dayNum)
+                    val monthName = currentDateTime.format(DateTimeFormatter.ofPattern("MMMM", Locale.ENGLISH))
+                    "$dayName, $dayNum$suffix $monthName"
+                }
 
-            Text(
-                text = dateFormatted,
-                fontSize = 28.sp,
-                fontWeight = FontWeight.Thin,
-                color = Color.White,
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            )
+                val startOfTodayMs = remember(todayKey) {
+                    LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+                }
+                val completedTodayList = remember(completedTodos, startOfTodayMs) {
+                    completedTodos.filter { it.completedAtMs >= startOfTodayMs }
+                }
+                val totalTasksToday = completedTodayList.size + todos.size
+                val taskRatio = if (totalTasksToday > 0) {
+                    completedTodayList.size.toFloat() / totalTasksToday.toFloat()
+                } else 0f
 
-            Spacer(modifier = Modifier.height(8.dp))
+                val totalPlannedSecondsToday = ((completedTodayList.sumOf { it.plannedMinutes } + todos.sumOf { it.plannedMinutes }).coerceAtLeast(60)) * 60f
+                val workRatio = (displayedWorkSeconds.toFloat() / totalPlannedSecondsToday).coerceIn(0f, 1f)
 
-            // Top Progress Bar -> Now Indicates Daily Productivity Score (0% - 100%)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.5.dp)
-                    .background(Color.White.copy(alpha = 0.22f))
-            ) {
+                val targetProgress = if (totalTasksToday > 0) {
+                    ((taskRatio * 0.6f) + (workRatio * 0.4f)).coerceIn(0f, 1f)
+                } else {
+                    (displayedWorkSeconds.toFloat() / (4 * 3600f)).coerceIn(0f, 1f)
+                }
+
+                // Smooth Spring Animation for Capsule Progress Bar Fill
+                val animatedProgress by animateFloatAsState(
+                    targetValue = targetProgress.coerceIn(0.04f, 1f),
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioLowBouncy,
+                        stiffness = Spring.StiffnessLow
+                    ),
+                    label = "productivity_bar_anim"
+                )
+                val productivityPct = (targetProgress * 100).roundToInt()
+
+                val workedHours = displayedWorkSeconds / 3600
+                val workedMinutes = (displayedWorkSeconds % 3600) / 60
+                val workedFormatted = String.format(Locale.ENGLISH, "%dh %02dm", workedHours, workedMinutes)
+
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth(productivityProgress.coerceIn(0.03f, 1f))
-                        .height(2.5.dp)
-                        .background(Color.White)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(5.dp))
-
-            Row(
-                modifier = Modifier.align(Alignment.CenterHorizontally),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Productivity: $productivityPct%",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-                Text(
-                    text = "  ·  ",
-                    fontSize = 11.sp,
-                    color = Color.White.copy(alpha = 0.5f)
-                )
-                Text(
-                    text = if (isWorkTimerRunning) "▶ Working: $workedFormatted" else "Worked: $workedFormatted",
-                    fontSize = 11.sp,
-                    fontWeight = if (isWorkTimerRunning) FontWeight.Bold else FontWeight.Medium,
-                    color = if (isWorkTimerRunning) Color.White else Color.White.copy(alpha = 0.85f),
-                    modifier = Modifier
-                        .clickable { toggleWorkTimer(null) }
-                        .padding(horizontal = 2.dp, vertical = 2.dp)
-                )
-                Text(
-                    text = "  ·  ${hoursRemaining}h left",
-                    fontSize = 11.sp,
-                    color = Color.White.copy(alpha = 0.5f)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // --- CURRENT PERFORMING JOB & WELLNESS BAR (WATER, BREATH, WORKOUT) ---
-            CurrentJobAndWellnessBanner(
-                activeJob = activeJobItem,
-                isWorkTimerRunning = isWorkTimerRunning,
-                waterGlassesToday = waterGlassesToday,
-                isWaterDue = isWaterDue,
-                onToggleWork = { toggleWorkTimer(null) },
-                onLogWater = {
-                    waterGlassesToday += 1
-                    lastWaterReminderWorkSec = displayedWorkSeconds
-                    prefs.edit()
-                        .putInt("water_count_$todayKey", waterGlassesToday)
-                        .putLong("last_water_sec_$todayKey", lastWaterReminderWorkSec)
-                        .apply()
-                    android.widget.Toast.makeText(
-                        context,
-                        "💧 Hydration logged ($waterGlassesToday glasses today)",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                },
-                onOpenWellness = { showWellnessModal = true }
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Top Action Row: [+ TASK] [+ EVENT] [DONE]  &  (📊) (📻•) (♪) (→)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    ModeChip(
-                        label = "+ TASK",
-                        selected = !isAddingEvent,
-                        onClick = { isAddingEvent = false }
-                    )
-                    ModeChip(
-                        label = "+ EVENT",
-                        selected = isAddingEvent,
-                        onClick = { isAddingEvent = true }
-                    )
-                    ModeChip(
-                        label = "DONE (${completedTodos.size})",
-                        selected = false,
-                        onClick = { showCompletedModal = true }
-                    )
-                }
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .size(34.dp)
-                            .border(1.2.dp, Color.White.copy(alpha = 0.6f), CircleShape)
-                            .clickable { showAnalyticsModal = true }
-                    ) {
-                        AnalyticsVectorIcon(tint = Color.White)
-                    }
-
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .size(34.dp)
-                            .border(
-                                width = 1.2.dp,
-                                color = if (isReadingNews) Color.White else Color.White.copy(alpha = 0.45f),
-                                shape = CircleShape
-                            )
-                            .background(
-                                color = if (isReadingNews) Color.White.copy(alpha = 0.22f) else Color.Transparent,
-                                shape = CircleShape
-                            )
-                            .combinedClickable(
-                                onClick = {
-                                    if (isReadingNews) {
-                                        isReadingNews = false
-                                        ttsEngine?.stop()
-                                    } else {
-                                        isReadingNews = true
-                                        hasUnheardNews = false
-                                        scope.launch {
-                                            val summaries = fetch3SentenceNewsSummaries(newsLanguageIsTamil)
-                                            val first = summaries.firstOrNull() ?: ""
-                                            if (first.isNotBlank()) {
-                                                prefs.edit().putString("last_heard_headline", first).apply()
-                                            }
-                                            if (isReadingNews && ttsEngine != null) {
-                                                val locale = if (newsLanguageIsTamil) Locale("ta", "IN") else Locale.US
-                                                ttsEngine?.setLanguage(locale)
-                                                val intro = if (newsLanguageIsTamil) "இன்றைய முக்கிய செய்திகள்." else "Latest 3-sentence news updates."
-                                                ttsEngine?.speak(intro, TextToSpeech.QUEUE_FLUSH, null, "NEWS_INTRO")
-                                                summaries.forEachIndexed { idx, summary ->
-                                                    val uId = if (idx == summaries.lastIndex) "NEWS_END" else "NEWS_$idx"
-                                                    ttsEngine?.speak(summary, TextToSpeech.QUEUE_ADD, null, uId)
-                                                }
-                                            }
-                                        }
-                                    }
-                                },
-                                onLongClick = {
-                                    newsLanguageIsTamil = !newsLanguageIsTamil
-                                    prefs.edit().putBoolean("news_lang_tamil", newsLanguageIsTamil).apply()
-                                    val toastMsg = if (newsLanguageIsTamil) "News Language: தமிழ் (Tamil)" else "News Language: English"
-                                    android.widget.Toast.makeText(context, toastMsg, android.widget.Toast.LENGTH_SHORT).show()
+                        .fillMaxSize()
+                        .background(Color.Black)
+                        .pointerInput(Unit) {
+                            detectHorizontalDragGestures { _, dragAmount ->
+                                if (dragAmount > 50f) {
+                                    openPhonePeQrScanner(context)
                                 }
-                            )
+                            }
+                        }
+                        .padding(horizontal = 24.dp, vertical = 16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(bottom = 60.dp)
                     ) {
-                        RadioVectorIcon(
-                            tint = if (isReadingNews) Color.White else Color.White.copy(alpha = 0.7f)
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Text(
+                            text = timeFormatted,
+                            fontSize = 26.sp,
+                            fontWeight = FontWeight.Normal,
+                            color = Color.White
                         )
-                        if (hasUnheardNews) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = dateFormatted,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Normal,
+                            color = Color.White.copy(alpha = 0.65f)
+                        )
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        // Single Rounded Capsule Progress Bar + Equal-Width Labels Below
+                        Column(modifier = Modifier.fillMaxWidth()) {
                             Box(
                                 modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(3.dp)
-                                    .size(6.dp)
-                                    .background(Color.White, CircleShape)
-                            )
+                                    .fillMaxWidth()
+                                    .height(14.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF2B2B2B))
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(animatedProgress)
+                                        .fillMaxHeight()
+                                        .clip(CircleShape)
+                                        .background(Color.White)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Productivity in progress $productivityPct%",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = if (isWorkTimerRunning) "▶ Working $workedFormatted" else "Worked $workedFormatted",
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isWorkTimerRunning) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isWorkTimerRunning) Color.White else Color.White.copy(alpha = 0.75f),
+                                    modifier = Modifier.clickable { toggleWorkTimer(null) }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        // Rounded Pill & Circle Action Controls: ( + New ) ( Done · X ) & (📊) (📻) (♪) (→)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(Color.White)
+                                        .clickable {
+                                            newTitleText = ""
+                                            newEventDateText = ""
+                                            isCreatingEvent = false
+                                            showNewItemModal = true
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                                ) {
+                                    Text(
+                                        text = "+ New",
+                                        color = Color.Black,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF1C1C1C))
+                                        .clickable { showCompletedModal = true }
+                                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                                ) {
+                                    Text(
+                                        text = "Done · ${completedTodos.size}",
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF1C1C1C))
+                                        .clickable { showAnalyticsModal = true }
+                                ) {
+                                    AnalyticsVectorIcon(tint = Color.White)
+                                }
+
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isReadingNews) Color.White else Color(0xFF1C1C1C))
+                                        .combinedClickable(
+                                            onClick = {
+                                                if (isReadingNews) {
+                                                    isReadingNews = false
+                                                    ttsEngine?.stop()
+                                                } else {
+                                                    isReadingNews = true
+                                                    hasUnheardNews = false
+                                                    scope.launch {
+                                                        val summaries = fetch3SentenceNewsSummaries(newsLanguageIsTamil)
+                                                        val first = summaries.firstOrNull() ?: ""
+                                                        if (first.isNotBlank()) {
+                                                            prefs.edit().putString("last_heard_headline", first).apply()
+                                                        }
+                                                        if (isReadingNews && ttsEngine != null) {
+                                                            val locale = if (newsLanguageIsTamil) Locale("ta", "IN") else Locale.US
+                                                            ttsEngine?.setLanguage(locale)
+                                                            val intro = if (newsLanguageIsTamil) "இன்றைய முக்கிய செய்திகள்." else "Latest 3-sentence news updates."
+                                                            ttsEngine?.speak(intro, TextToSpeech.QUEUE_FLUSH, null, "NEWS_INTRO")
+                                                            summaries.forEachIndexed { idx, summary ->
+                                                                val uId = if (idx == summaries.lastIndex) "NEWS_END" else "NEWS_$idx"
+                                                                ttsEngine?.speak(summary, TextToSpeech.QUEUE_ADD, null, uId)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            onLongClick = {
+                                                newsLanguageIsTamil = !newsLanguageIsTamil
+                                                prefs.edit().putBoolean("news_lang_tamil", newsLanguageIsTamil).apply()
+                                                val toastMsg = if (newsLanguageIsTamil) "News Language: தமிழ் (Tamil)" else "News Language: English"
+                                                android.widget.Toast.makeText(context, toastMsg, android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                        )
+                                ) {
+                                    RadioVectorIcon(
+                                        tint = if (isReadingNews) Color.Black else Color.White
+                                    )
+                                    if (hasUnheardNews && !isReadingNews) {
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .padding(4.dp)
+                                                .size(6.dp)
+                                                .background(Color.White, CircleShape)
+                                        )
+                                    }
+                                }
+
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(CircleShape)
+                                        .background(if (showMusicPlayer) Color.White else Color(0xFF1C1C1C))
+                                        .clickable { showMusicPlayer = !showMusicPlayer }
+                                ) {
+                                    Text(
+                                        text = "♪",
+                                        color = if (showMusicPlayer) Color.Black else Color.White,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .clip(CircleShape)
+                                        .background(Color.White)
+                                        .clickable {
+                                            isSelectingCustomApp = false
+                                            showDrawer = true
+                                        }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                        contentDescription = "Open App Menu",
+                                        tint = Color.Black,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(22.dp))
+
+                        // Clean Editorial Tasks & Events List with Smooth Item Placement Animations
+                        LazyColumn(modifier = Modifier.weight(1f)) {
+                            if (todos.isEmpty() && events.isEmpty()) {
+                                item {
+                                    Text(
+                                        text = "Tap + New to add a task or event",
+                                        fontSize = 15.sp,
+                                        color = Color.White.copy(alpha = 0.4f),
+                                        modifier = Modifier.padding(vertical = 12.dp)
+                                    )
+                                }
+                            }
+
+                            items(todos, key = { "todo_${it.id}" }) { item ->
+                                val isSelectedJob = currentJobId == item.id
+                                val isActivelyWorkingThisJob = isSelectedJob && isWorkTimerRunning
+                                val ageDays = ((System.currentTimeMillis() - item.createdAtMs) / (1000L * 60 * 60 * 24)).toInt()
+                                val ageTag = if (ageDays >= 3) " · ${ageDays}d old" else ""
+                                val blockerTag = if (item.blocker != "None") " · ${item.blocker}" else ""
+                                val statusTag = if (isActivelyWorkingThisJob) " · Working now" else ""
+
+                                MinimalTaskRow(
+                                    modifier = Modifier.animateItem(),
+                                    title = item.text,
+                                    subtitle = "${item.category} · ${item.plannedMinutes}m$statusTag$ageTag$blockerTag",
+                                    isWorkingTask = isActivelyWorkingThisJob,
+                                    pulseAlpha = pulseAlpha,
+                                    pulseScale = pulseScale,
+                                    showDot = true,
+                                    onToggleWorkThisTask = {
+                                        if (isActivelyWorkingThisJob) {
+                                            toggleWorkTimer(false)
+                                        } else {
+                                            currentJobId = item.id
+                                            prefs.edit().putString("current_job_id", item.id).apply()
+                                            toggleWorkTimer(true)
+                                        }
+                                    },
+                                    onTapComplete = { completeAndArchiveTask(item) },
+                                    onLongPress = {
+                                        currentJobId = item.id
+                                        prefs.edit().putString("current_job_id", item.id).apply()
+                                        focusedTask = item
+                                    },
+                                    onEdit = {
+                                        editingTodo = item
+                                        editTodoText = item.text
+                                        editTodoCategory = item.category
+                                        editTodoPlannedMins = item.plannedMinutes
+                                        editTodoBlocker = item.blocker
+                                    },
+                                    onDelete = {
+                                        todos = todos.filter { it.id != item.id }
+                                        saveTodos(prefs, "saved_todos", todos)
+                                    }
+                                )
+                            }
+
+                            if (events.isNotEmpty()) {
+                                item {
+                                    Spacer(modifier = Modifier.height(14.dp))
+                                    Text(
+                                        text = "UPCOMING EVENTS",
+                                        fontSize = 10.5.sp,
+                                        letterSpacing = 1.4.sp,
+                                        color = Color.White.copy(alpha = 0.45f),
+                                        modifier = Modifier.padding(bottom = 6.dp)
+                                    )
+                                }
+
+                                items(events, key = { "event_${it.id}" }) { event ->
+                                    MinimalTaskRow(
+                                        modifier = Modifier.animateItem(),
+                                        title = event.title,
+                                        subtitle = event.dateTimeText,
+                                        isWorkingTask = false,
+                                        pulseAlpha = 1f,
+                                        pulseScale = 1f,
+                                        showDot = false,
+                                        onToggleWorkThisTask = {},
+                                        onTapComplete = {
+                                            events = events.filter { it.id != event.id }
+                                            saveEvents(prefs, events)
+                                        },
+                                        onLongPress = {},
+                                        onEdit = {
+                                            editingEvent = event
+                                            editEventTitle = event.title
+                                            editEventDate = event.dateTimeText
+                                        },
+                                        onDelete = {
+                                            events = events.filter { it.id != event.id }
+                                            saveEvents(prefs, events)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        // Smooth Animated Expansion for Musicamp Widget
+                        AnimatedVisibility(
+                            visible = showMusicPlayer,
+                            enter = fadeIn(tween(220)) + expandVertically(tween(240)),
+                            exit = fadeOut(tween(180)) + shrinkVertically(tween(200))
+                        ) {
+                            Column {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                MusicampConnectedWidget(context = context)
+                            }
                         }
                     }
 
-                    Box(
-                        contentAlignment = Alignment.Center,
+                    // Original 4-Icon Bottom Dock
+                    Row(
                         modifier = Modifier
-                            .size(34.dp)
-                            .border(
-                                width = 1.2.dp,
-                                color = if (showMusicPlayer) Color.White else Color.White.copy(alpha = 0.45f),
-                                shape = CircleShape
-                            )
-                            .background(
-                                color = if (showMusicPlayer) Color.White.copy(alpha = 0.22f) else Color.Transparent,
-                                shape = CircleShape
-                            )
-                            .clickable { showMusicPlayer = !showMusicPlayer }
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "♪",
-                            color = if (showMusicPlayer) Color.White else Color.White.copy(alpha = 0.65f),
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                        DockIconButton(icon = Icons.Default.Call, description = "Dialer") {
+                            openDialer(context)
+                        }
 
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier
-                            .size(34.dp)
-                            .border(1.2.dp, Color.White, CircleShape)
-                            .clickable {
-                                isSelectingCustomApp = false
-                                showDrawer = true
-                            }
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                            contentDescription = "Open App Drawer",
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
+                        DockIconButton(icon = Icons.Default.Email, description = "Messages") {
+                            openMessages(context)
+                        }
+
+                        DockIconButton(icon = Icons.Default.Search, description = "Browser") {
+                            openBrowser(context)
+                        }
+
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(34.dp)
+                                .border(1.5.dp, Color.White, RoundedCornerShape(8.dp))
+                                .combinedClickable(
+                                    onClick = {
+                                        if (customAppPkg != null) {
+                                            launchPackage(context, customAppPkg!!)
+                                        } else {
+                                            isSelectingCustomApp = true
+                                            showDrawer = true
+                                        }
+                                    },
+                                    onLongClick = {
+                                        isSelectingCustomApp = true
+                                        showDrawer = true
+                                    }
+                                )
+                        ) {
+                            Icon(
+                                imageVector = if (customAppPkg == null) Icons.Default.Add else Icons.Default.Star,
+                                contentDescription = "Custom Quick App",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
             }
+        }
+    }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Quick Creation Input Box + Custom User Category Selector
-            Column(modifier = Modifier.fillMaxWidth()) {
+    // --- ROUNDED POP-UP SHEET FOR (+ New) TASK OR EVENT ---
+    if (showNewItemModal) {
+        AlertDialog(
+            onDismissRequest = { showNewItemModal = false },
+            containerColor = Color(0xFF121212),
+            titleContentColor = Color.White,
+            textContentColor = Color.White,
+            shape = RoundedCornerShape(24.dp),
+            title = {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (!isCreatingEvent) Color.White else Color(0xFF262626))
+                                .clickable { isCreatingEvent = false }
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "Task",
+                                color = if (!isCreatingEvent) Color.Black else Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (isCreatingEvent) Color.White else Color(0xFF262626))
+                                .clickable { isCreatingEvent = true }
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "Event",
+                                color = if (isCreatingEvent) Color.Black else Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    IconButton(onClick = { showNewItemModal = false }, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White.copy(alpha = 0.7f))
+                    }
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(
                         value = newTitleText,
                         onValueChange = { newTitleText = it },
                         placeholder = {
                             Text(
-                                text = if (isAddingEvent) "Add an upcoming event..." else "Add a new task...",
+                                text = if (isCreatingEvent) "Event title..." else "What needs to be done?",
                                 color = Color.White.copy(alpha = 0.45f)
                             )
                         },
                         singleLine = true,
-                        keyboardOptions = KeyboardOptions(
-                            imeAction = if (isAddingEvent) ImeAction.Next else ImeAction.Done
-                        ),
-                        keyboardActions = KeyboardActions(
-                            onDone = { addCurrentItem() }
-                        ),
-                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(14.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White,
                             focusedBorderColor = Color.White,
-                            unfocusedBorderColor = Color.White.copy(alpha = 0.35f),
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
                             cursorColor = Color.White
-                        )
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    IconButton(onClick = { addCurrentItem() }) {
-                        Icon(
-                            imageVector = Icons.Default.Add,
-                            contentDescription = "Add Item",
-                            tint = Color.White
-                        )
-                    }
-                }
-
-                // User-Created Category Selector & Planned Time Row
-                if (!isAddingEvent && newTitleText.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    val safeCatName = categories.getOrElse(selectedCategoryIndex) { categories.firstOrNull() ?: "General" }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Cat: [$safeCatName]",
-                            color = Color.White,
-                            fontSize = 10.5.sp,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier
-                                .border(0.8.dp, Color.White.copy(alpha = 0.5f), RoundedCornerShape(3.dp))
-                                .clickable {
-                                    selectedCategoryIndex = (selectedCategoryIndex + 1) % categories.size
-                                }
-                                .padding(horizontal = 7.dp, vertical = 4.dp)
-                        )
-                        Text(
-                            text = "[+ Custom]",
-                            color = Color.White,
-                            fontSize = 10.5.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .border(0.8.dp, Color.White, RoundedCornerShape(3.dp))
-                                .clickable {
-                                    newCategoryName = ""
-                                    showAddCategoryDialog = true
-                                }
-                                .padding(horizontal = 7.dp, vertical = 4.dp)
-                        )
-                        Text(
-                            text = "Plan: [${PLANNED_MINUTES_OPTIONS[selectedPlannedIndex]}m]",
-                            color = Color.White,
-                            fontSize = 10.5.sp,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier
-                                .border(0.8.dp, Color.White.copy(alpha = 0.5f), RoundedCornerShape(3.dp))
-                                .clickable {
-                                    selectedPlannedIndex = (selectedPlannedIndex + 1) % PLANNED_MINUTES_OPTIONS.size
-                                }
-                                .padding(horizontal = 7.dp, vertical = 4.dp)
-                        )
-                    }
-                }
-
-                if (isAddingEvent) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = newEventDateText,
-                        onValueChange = { newEventDateText = it },
-                        placeholder = {
-                            Text(
-                                text = "Date / Time (e.g., Tomorrow · All day)",
-                                color = Color.White.copy(alpha = 0.45f),
-                                fontSize = 13.sp
-                            )
-                        },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(
-                            onDone = { addCurrentItem() }
                         ),
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White,
-                            focusedBorderColor = Color.White,
-                            unfocusedBorderColor = Color.White.copy(alpha = 0.35f),
-                            cursorColor = Color.White
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (isCreatingEvent) {
+                        OutlinedTextField(
+                            value = newEventDateText,
+                            onValueChange = { newEventDateText = it },
+                            placeholder = {
+                                Text(
+                                    text = "Date / Time (e.g., Tomorrow · 4:00 PM)",
+                                    color = Color.White.copy(alpha = 0.45f),
+                                    fontSize = 13.sp
+                                )
+                            },
+                            singleLine = true,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedBorderColor = Color.White,
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
+                                cursorColor = Color.White
+                            ),
+                            modifier = Modifier.fillMaxWidth()
                         )
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Main Scrollable Tasks & Events List
-            LazyColumn(modifier = Modifier.weight(1f)) {
-                item {
-                    Text(
-                        text = "TODAY'S TASKS (▶ = SET CURRENT JOB | TAP = DONE)",
-                        fontSize = 10.sp,
-                        letterSpacing = 1.2.sp,
-                        color = Color.White.copy(alpha = 0.6f),
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    )
-                }
-
-                if (todos.isEmpty()) {
-                    item {
+                    } else {
                         Text(
-                            text = "No pending tasks",
-                            fontSize = 13.sp,
-                            color = Color.White.copy(alpha = 0.35f),
-                            modifier = Modifier.padding(vertical = 6.dp)
+                            text = "CATEGORY (USER-CREATED)",
+                            fontSize = 10.sp,
+                            letterSpacing = 1.sp,
+                            color = Color.White.copy(alpha = 0.55f)
                         )
-                    }
-                }
-
-                items(todos, key = { "todo_${it.id}" }) { item ->
-                    val isCurrentJob = activeJobItem?.id == item.id
-                    val ageDays = ((System.currentTimeMillis() - item.createdAtMs) / (1000L * 60 * 60 * 24)).toInt()
-                    val ageTag = if (ageDays >= 3) " · ⚠️ ${ageDays}d" else ""
-                    val blockerTag = if (item.blocker != "None") " · [${item.blocker}]" else ""
-                    val activeTag = if (isCurrentJob) " · ⚡ ACTIVE JOB" else ""
-
-                    AgendaRowItem(
-                        title = item.text,
-                        subtitleHighlight = item.category,
-                        subtitleRest = "  ·  Plan: ${item.plannedMinutes}m$activeTag$ageTag$blockerTag",
-                        isActiveJob = isCurrentJob,
-                        onSetActiveJob = {
-                            currentJobId = item.id
-                            prefs.edit().putString("current_job_id", item.id).apply()
-                            toggleWorkTimer(true)
-                        },
-                        onTapRemove = { completeAndArchiveTask(item) },
-                        onLongPress = {
-                            currentJobId = item.id
-                            prefs.edit().putString("current_job_id", item.id).apply()
-                            focusedTask = item
-                        },
-                        onEdit = {
-                            editingTodo = item
-                            editTodoText = item.text
-                            editTodoCategory = item.category
-                            editTodoPlannedMins = item.plannedMinutes
-                            editTodoBlocker = item.blocker
-                        },
-                        onDelete = {
-                            todos = todos.filter { it.id != item.id }
-                            saveTodos(prefs, "saved_todos", todos)
-                        }
-                    )
-                }
-
-                item {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "UPCOMING EVENTS",
-                        fontSize = 10.sp,
-                        letterSpacing = 1.2.sp,
-                        color = Color.White.copy(alpha = 0.6f),
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    )
-                }
-
-                if (events.isEmpty()) {
-                    item {
-                        Text(
-                            text = "No upcoming events",
-                            fontSize = 13.sp,
-                            color = Color.White.copy(alpha = 0.35f),
-                            modifier = Modifier.padding(vertical = 6.dp)
-                        )
-                    }
-                }
-
-                items(events, key = { "event_${it.id}" }) { event ->
-                    val parts = event.dateTimeText.split("·", limit = 2)
-                    val highlight = parts.getOrNull(0)?.trim() ?: event.dateTimeText
-                    val rest = if (parts.size > 1) "  ·  ${parts[1].trim()}" else ""
-
-                    AgendaRowItem(
-                        title = event.title,
-                        subtitleHighlight = highlight,
-                        subtitleRest = rest,
-                        isActiveJob = null,
-                        onSetActiveJob = {},
-                        onTapRemove = {
-                            events = events.filter { it.id != event.id }
-                            saveEvents(prefs, events)
-                        },
-                        onLongPress = {},
-                        onEdit = {
-                            editingEvent = event
-                            editEventTitle = event.title
-                            editEventDate = event.dateTimeText
-                        },
-                        onDelete = {
-                            events = events.filter { it.id != event.id }
-                            saveEvents(prefs, events)
-                        }
-                    )
-                }
-            }
-
-            if (showMusicPlayer) {
-                Spacer(modifier = Modifier.height(8.dp))
-                MusicampConnectedWidget(context = context)
-            }
-        }
-
-        // Bottom 4-Icon Dock
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            DockIconButton(icon = Icons.Default.Call, description = "Dialer") {
-                openDialer(context)
-            }
-
-            DockIconButton(icon = Icons.Default.Email, description = "Messages") {
-                openMessages(context)
-            }
-
-            DockIconButton(icon = Icons.Default.Search, description = "Browser") {
-                openBrowser(context)
-            }
-
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(34.dp)
-                    .border(1.5.dp, Color.White, RoundedCornerShape(8.dp))
-                    .combinedClickable(
-                        onClick = {
-                            if (customAppPkg != null) {
-                                launchPackage(context, customAppPkg!!)
-                            } else {
-                                isSelectingCustomApp = true
-                                showDrawer = true
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            userCategories.forEachIndexed { idx, cat ->
+                                val selected = idx == selectedCategoryIndex
+                                Box(
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(if (selected) Color.White else Color(0xFF262626))
+                                        .clickable { selectedCategoryIndex = idx }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Text(
+                                        text = cat.name,
+                                        color = if (selected) Color.Black else Color.White,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                }
                             }
-                        },
-                        onLongClick = {
-                            isSelectingCustomApp = true
-                            showDrawer = true
+
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .border(1.dp, Color.White, CircleShape)
+                                    .clickable {
+                                        newCategoryName = ""
+                                        newCategoryHighImpact = true
+                                        showAddCategoryDialog = true
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = "+ Create Category",
+                                    color = Color.White,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
+
+                        Text(
+                            text = "PLANNED DURATION",
+                            fontSize = 10.sp,
+                            letterSpacing = 1.sp,
+                            color = Color.White.copy(alpha = 0.55f)
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            PLANNED_MINUTES_OPTIONS.forEachIndexed { idx, mins ->
+                                val selected = idx == selectedPlannedIndex
+                                Box(
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(if (selected) Color.White else Color(0xFF262626))
+                                        .clickable { selectedPlannedIndex = idx }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Text(
+                                        text = "${mins}m",
+                                        color = if (selected) Color.Black else Color.White,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .clickable {
+                            if (newTitleText.isNotBlank()) {
+                                if (isCreatingEvent) {
+                                    val dateLabel = if (newEventDateText.isBlank()) "Upcoming · All day" else newEventDateText.trim()
+                                    events = listOf(EventItem(title = newTitleText.trim(), dateTimeText = dateLabel)) + events
+                                    saveEvents(prefs, events)
+                                    showNewItemModal = false
+                                } else {
+                                    if (userCategories.isEmpty()) {
+                                        newCategoryName = ""
+                                        newCategoryHighImpact = true
+                                        showAddCategoryDialog = true
+                                    } else {
+                                        val chosenCat = userCategories.getOrElse(selectedCategoryIndex) { userCategories.first() }.name
+                                        val newItem = TodoItem(
+                                            text = newTitleText.trim(),
+                                            category = chosenCat,
+                                            plannedMinutes = PLANNED_MINUTES_OPTIONS[selectedPlannedIndex]
+                                        )
+                                        todos = listOf(newItem) + todos
+                                        if (currentJobId == null) {
+                                            currentJobId = newItem.id
+                                            prefs.edit().putString("current_job_id", newItem.id).apply()
+                                        }
+                                        saveTodos(prefs, "saved_todos", todos)
+                                        incrementDailyStat(prefs, "added_count_${LocalDate.now()}")
+                                        showNewItemModal = false
+                                    }
+                                }
+                            }
+                        }
+                ) {
+                    Text(
+                        text = if (isCreatingEvent) "Save Event" else "Save Task",
+                        color = Color.Black,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
                     )
-            ) {
-                Icon(
-                    imageVector = if (customAppPkg == null) Icons.Default.Add else Icons.Default.Star,
-                    contentDescription = "Custom Quick App",
-                    tint = Color.White,
-                    modifier = Modifier.size(18.dp)
-                )
+                }
             }
-        }
+        )
     }
 
-    // Dialog: Create New Custom User Category
+    // --- CREATE CUSTOM USER CATEGORY DIALOG ---
     if (showAddCategoryDialog) {
         AlertDialog(
             onDismissRequest = { showAddCategoryDialog = false },
-            containerColor = Color.Black,
+            containerColor = Color(0xFF121212),
             titleContentColor = Color.White,
             textContentColor = Color.White,
-            title = { Text("Create Custom Category") },
+            shape = RoundedCornerShape(24.dp),
+            title = { Text("Create Category", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
             text = {
-                OutlinedTextField(
-                    value = newCategoryName,
-                    onValueChange = { newCategoryName = it },
-                    placeholder = { Text("e.g., MCOP, Drafting, Coding...", color = Color.White.copy(alpha = 0.4f)) },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color.White,
-                        unfocusedBorderColor = Color.White.copy(alpha = 0.4f)
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = newCategoryName,
+                        onValueChange = { newCategoryName = it },
+                        placeholder = { Text("e.g., MCOP, Drafting, Claims...", color = Color.White.copy(alpha = 0.4f)) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = Color.White,
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.3f)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
                     )
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val trimmed = newCategoryName.trim()
-                    if (trimmed.isNotEmpty()) {
-                        if (!categories.contains(trimmed)) {
-                            categories = categories + trimmed
-                            saveUserCategories(prefs, categories)
+                    Text(
+                        text = "ANALYTICS IMPACT TYPE",
+                        fontSize = 10.sp,
+                        letterSpacing = 1.sp,
+                        color = Color.White.copy(alpha = 0.55f)
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (newCategoryHighImpact) Color.White else Color(0xFF262626))
+                                .clickable { newCategoryHighImpact = true }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "High-Impact",
+                                color = if (newCategoryHighImpact) Color.Black else Color.White,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
-                        selectedCategoryIndex = categories.indexOf(trimmed).coerceAtLeast(0)
-                        if (editingTodo != null) {
-                            editTodoCategory = trimmed
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (!newCategoryHighImpact) Color.White else Color(0xFF262626))
+                                .clickable { newCategoryHighImpact = false }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "Admin / Busy",
+                                color = if (!newCategoryHighImpact) Color.Black else Color.White,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
-                    showAddCategoryDialog = false
-                }) {
-                    Text("Add", color = Color.White)
+                }
+            },
+            confirmButton = {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .clickable {
+                            val trimmed = newCategoryName.trim()
+                            if (trimmed.isNotEmpty()) {
+                                if (userCategories.none { it.name.equals(trimmed, ignoreCase = true) }) {
+                                    userCategories = userCategories + UserCategory(trimmed, newCategoryHighImpact)
+                                    saveUserCategories(prefs, userCategories)
+                                }
+                                selectedCategoryIndex = userCategories.indexOfFirst {
+                                    it.name.equals(trimmed, ignoreCase = true)
+                                }.coerceAtLeast(0)
+                                if (editingTodo != null) {
+                                    editTodoCategory = trimmed
+                                }
+                            }
+                            showAddCategoryDialog = false
+                        }
+                        .padding(horizontal = 18.dp, vertical = 8.dp)
+                ) {
+                    Text("Add Category", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             },
             dismissButton = {
@@ -1110,108 +1288,127 @@ fun LauncherScreen(activity: Activity) {
         )
     }
 
-    // Dialog: Edit Task & Metadata
+    // --- RANDOM WELLNESS POP-UP DIALOG ---
+    if (activeWellnessPopup != null) {
+        RandomWellnessPopupDialog(
+            popup = activeWellnessPopup!!,
+            onDismiss = { activeWellnessPopup = null }
+        )
+    }
+
+    // --- EDIT TASK DIALOG ---
     if (editingTodo != null) {
         AlertDialog(
             onDismissRequest = { editingTodo = null },
-            containerColor = Color.Black,
+            containerColor = Color(0xFF121212),
             titleContentColor = Color.White,
             textContentColor = Color.White,
-            title = { Text("Edit Task & Metadata") },
+            shape = RoundedCornerShape(24.dp),
+            title = { Text("Edit Task", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(
                         value = editTodoText,
                         onValueChange = { editTodoText = it },
                         singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White,
                             focusedBorderColor = Color.White,
-                            unfocusedBorderColor = Color.White.copy(alpha = 0.4f)
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.3f)
                         )
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(
-                            text = "Cat: [$editTodoCategory]",
-                            color = Color.White,
-                            fontSize = 11.5.sp,
-                            fontFamily = FontFamily.Monospace,
+                        Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+                                .clip(CircleShape)
+                                .background(Color(0xFF262626))
                                 .clickable {
-                                    val nextIdx = (categories.indexOf(editTodoCategory) + 1) % categories.size
-                                    editTodoCategory = categories[nextIdx]
+                                    if (userCategories.isNotEmpty()) {
+                                        val idx = userCategories.indexOfFirst { it.name == editTodoCategory }
+                                        val nextIdx = (idx + 1) % userCategories.size
+                                        editTodoCategory = userCategories[nextIdx].name
+                                    }
                                 }
-                                .padding(10.dp)
-                        )
-                        Text(
-                            text = "+ Custom",
-                            color = Color.White,
-                            fontSize = 11.5.sp,
-                            fontFamily = FontFamily.Monospace,
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text(
+                                text = "Category: $editTodoCategory",
+                                color = Color.White,
+                                fontSize = 11.5.sp
+                            )
+                        }
+                        Box(
                             modifier = Modifier
-                                .border(1.dp, Color.White, RoundedCornerShape(4.dp))
+                                .clip(CircleShape)
+                                .background(Color.White)
                                 .clickable {
                                     newCategoryName = ""
                                     showAddCategoryDialog = true
                                 }
-                                .padding(10.dp)
-                        )
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text("+ New", color = Color.Black, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
-                    Text(
-                        text = "Planned Time: [${editTodoPlannedMins}m] (Tap to cycle)",
-                        color = Color.White,
-                        fontSize = 11.5.sp,
-                        fontFamily = FontFamily.Monospace,
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+                            .clip(CircleShape)
+                            .background(Color(0xFF262626))
                             .clickable {
                                 val nextIdx = (PLANNED_MINUTES_OPTIONS.indexOf(editTodoPlannedMins) + 1) % PLANNED_MINUTES_OPTIONS.size
                                 editTodoPlannedMins = PLANNED_MINUTES_OPTIONS[nextIdx]
                             }
-                            .padding(10.dp)
-                    )
-                    Text(
-                        text = "Blocker: [$editTodoBlocker] (Tap to cycle)",
-                        color = Color.White,
-                        fontSize = 11.5.sp,
-                        fontFamily = FontFamily.Monospace,
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Text("Planned: ${editTodoPlannedMins}m (Tap to change)", color = Color.White, fontSize = 11.5.sp)
+                    }
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+                            .clip(CircleShape)
+                            .background(Color(0xFF262626))
                             .clickable {
                                 val nextIdx = (BLOCKER_OPTIONS.indexOf(editTodoBlocker) + 1) % BLOCKER_OPTIONS.size
                                 editTodoBlocker = BLOCKER_OPTIONS[nextIdx]
                             }
-                            .padding(10.dp)
-                    )
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Text("Blocker: $editTodoBlocker (Tap to change)", color = Color.White, fontSize = 11.5.sp)
+                    }
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    val current = editingTodo
-                    if (current != null && editTodoText.isNotBlank()) {
-                        todos = todos.map {
-                            if (it.id == current.id) {
-                                it.copy(
-                                    text = editTodoText.trim(),
-                                    category = editTodoCategory,
-                                    plannedMinutes = editTodoPlannedMins,
-                                    blocker = editTodoBlocker
-                                )
-                            } else it
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .clickable {
+                            val current = editingTodo
+                            if (current != null && editTodoText.isNotBlank()) {
+                                todos = todos.map {
+                                    if (it.id == current.id) {
+                                        it.copy(
+                                            text = editTodoText.trim(),
+                                            category = editTodoCategory,
+                                            plannedMinutes = editTodoPlannedMins,
+                                            blocker = editTodoBlocker
+                                        )
+                                    } else it
+                                }
+                                saveTodos(prefs, "saved_todos", todos)
+                            }
+                            editingTodo = null
                         }
-                        saveTodos(prefs, "saved_todos", todos)
-                    }
-                    editingTodo = null
-                }) {
-                    Text("Save", color = Color.White)
+                        .padding(horizontal = 18.dp, vertical = 8.dp)
+                ) {
+                    Text("Save", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             },
             dismissButton = {
@@ -1225,56 +1422,62 @@ fun LauncherScreen(activity: Activity) {
     if (editingEvent != null) {
         AlertDialog(
             onDismissRequest = { editingEvent = null },
-            containerColor = Color.Black,
+            containerColor = Color(0xFF121212),
             titleContentColor = Color.White,
             textContentColor = Color.White,
-            title = { Text("Edit Event") },
+            shape = RoundedCornerShape(24.dp),
+            title = { Text("Edit Event", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
             text = {
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = editEventTitle,
                         onValueChange = { editEventTitle = it },
-                        label = { Text("Event Title", color = Color.White.copy(alpha = 0.6f)) },
                         singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White,
                             focusedBorderColor = Color.White,
-                            unfocusedBorderColor = Color.White.copy(alpha = 0.4f)
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.3f)
                         )
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = editEventDate,
                         onValueChange = { editEventDate = it },
-                        label = { Text("Date / Time", color = Color.White.copy(alpha = 0.6f)) },
                         singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White,
                             focusedBorderColor = Color.White,
-                            unfocusedBorderColor = Color.White.copy(alpha = 0.4f)
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.3f)
                         )
                     )
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    val current = editingEvent
-                    if (current != null && editEventTitle.isNotBlank()) {
-                        events = events.map {
-                            if (it.id == current.id) {
-                                it.copy(
-                                    title = editEventTitle.trim(),
-                                    dateTimeText = editEventDate.trim().ifBlank { "Upcoming · All day" }
-                                )
-                            } else it
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(Color.White)
+                        .clickable {
+                            val current = editingEvent
+                            if (current != null && editEventTitle.isNotBlank()) {
+                                events = events.map {
+                                    if (it.id == current.id) {
+                                        it.copy(
+                                            title = editEventTitle.trim(),
+                                            dateTimeText = editEventDate.trim().ifBlank { "Upcoming · All day" }
+                                        )
+                                    } else it
+                                }
+                                saveEvents(prefs, events)
+                            }
+                            editingEvent = null
                         }
-                        saveEvents(prefs, events)
-                    }
-                    editingEvent = null
-                }) {
-                    Text("Save", color = Color.White)
+                        .padding(horizontal = 18.dp, vertical = 8.dp)
+                ) {
+                    Text("Save", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             },
             dismissButton = {
@@ -1286,284 +1489,235 @@ fun LauncherScreen(activity: Activity) {
     }
 }
 
-// --- CURRENT PERFORMING JOB BANNER & WELLNESS STRIP (💧 WATER, 🌬️ BREATH, 💪 WORKOUT) ---
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun CurrentJobAndWellnessBanner(
-    activeJob: TodoItem?,
-    isWorkTimerRunning: Boolean,
-    waterGlassesToday: Int,
-    isWaterDue: Boolean,
-    onToggleWork: () -> Unit,
-    onLogWater: () -> Unit,
-    onOpenWellness: () -> Unit
+fun MinimalTaskRow(
+    modifier: Modifier = Modifier,
+    title: String,
+    subtitle: String,
+    isWorkingTask: Boolean,
+    pulseAlpha: Float,
+    pulseScale: Float,
+    showDot: Boolean,
+    onToggleWorkThisTask: () -> Unit,
+    onTapComplete: () -> Unit,
+    onLongPress: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
 ) {
-    val workoutSuggestion = remember(activeJob) {
-        getWorkoutForTask(activeJob).first
-    }
-
-    Column(
-        modifier = Modifier
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
             .fillMaxWidth()
-            .border(
-                width = if (isWorkTimerRunning) 1.2.dp else 0.8.dp,
-                color = if (isWorkTimerRunning) Color.White else Color.White.copy(alpha = 0.4f),
-                shape = RoundedCornerShape(4.dp)
-            )
-            .padding(horizontal = 10.dp, vertical = 7.dp)
+            .padding(vertical = 10.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+        if (showDot) {
+            Box(
+                contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .weight(1f)
-                    .clickable(onClick = onToggleWork)
+                    .size(28.dp)
+                    .clickable(onClick = onToggleWorkThisTask)
             ) {
-                Text(
-                    text = if (isWorkTimerRunning) "⚡ JOB NOW: " else "⏸ CURRENT JOB: ",
-                    color = Color.White,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = if (activeJob != null) "${activeJob.text} [${activeJob.category}]" else "None selected (Tap ▶ on a task)",
-                    color = Color.White.copy(alpha = 0.9f),
-                    fontSize = 10.5.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .scale(if (isWorkingTask) pulseScale else 1f)
+                        .alpha(if (isWorkingTask) pulseAlpha else 1f)
+                        .background(
+                            color = if (isWorkingTask) Color.White else Color.Transparent,
+                            shape = CircleShape
+                        )
+                        .border(
+                            width = if (isWorkingTask) 1.5.dp else 1.2.dp,
+                            color = if (isWorkingTask) Color.White else Color.White.copy(alpha = 0.45f),
+                            shape = CircleShape
+                        )
                 )
             }
+            Spacer(modifier = Modifier.width(12.dp))
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .combinedClickable(
+                    onClick = onTapComplete,
+                    onLongClick = onLongPress
+                )
         ) {
-            // 1. Drink Water Reminder Chip
-            Box(
-                modifier = Modifier
-                    .border(
-                        width = if (isWaterDue) 1.2.dp else 0.8.dp,
-                        color = if (isWaterDue) Color.White else Color.White.copy(alpha = 0.45f),
-                        shape = RoundedCornerShape(3.dp)
-                    )
-                    .background(
-                        color = if (isWaterDue) Color.White.copy(alpha = 0.2f) else Color.Transparent,
-                        shape = RoundedCornerShape(3.dp)
-                    )
-                    .clickable(onClick = onLogWater)
-                    .padding(horizontal = 6.dp, vertical = 3.dp)
-            ) {
-                Text(
-                    text = if (isWaterDue) "💧 DRINK WATER! ($waterGlassesToday)" else "💧 Water: $waterGlassesToday",
-                    color = Color.White,
-                    fontSize = 9.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = if (isWaterDue) FontWeight.Bold else FontWeight.Normal
-                )
-            }
+            Text(
+                text = title,
+                color = Color.White,
+                fontSize = 17.5.sp,
+                fontWeight = if (isWorkingTask) FontWeight.Bold else FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                color = if (isWorkingTask) Color.White.copy(alpha = 0.85f) else Color.White.copy(alpha = 0.5f),
+                fontSize = 11.5.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
 
-            // 2. Deep Breath & Task-Based Workout Trigger
-            Box(
-                modifier = Modifier
-                    .border(0.8.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(3.dp))
-                    .clickable(onClick = onOpenWellness)
-                    .padding(horizontal = 6.dp, vertical = 3.dp)
-            ) {
-                Text(
-                    text = "🌬️ Breath · 💪 $workoutSuggestion",
-                    color = Color.White,
-                    fontSize = 9.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+        IconButton(
+            onClick = onEdit,
+            modifier = Modifier.size(28.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Edit,
+                contentDescription = "Edit",
+                tint = Color.White.copy(alpha = 0.45f),
+                modifier = Modifier.size(14.dp)
+            )
+        }
+
+        IconButton(
+            onClick = onDelete,
+            modifier = Modifier.size(28.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "Delete",
+                tint = Color.White.copy(alpha = 0.45f),
+                modifier = Modifier.size(14.dp)
+            )
         }
     }
 }
 
-// --- WELLNESS MICRO-BREAK MODAL (4-4-4 DEEP BREATHING PACER & TASK-BASED WORKOUTS) ---
-@Composable
-fun WellnessBreakScreen(
-    activeJob: TodoItem?,
-    waterGlassesToday: Int,
-    onLogWater: () -> Unit,
-    onClose: () -> Unit
-) {
-    val (shortWorkoutTitle, workoutSteps) = remember(activeJob) {
-        getWorkoutForTask(activeJob)
-    }
-
-    // 4-4-4 Box Breathing Pacer State
-    var isBreathingActive by remember { mutableStateOf(true) }
-    var breathTick by remember { mutableIntStateOf(0) }
-    LaunchedEffect(isBreathingActive) {
-        while (isBreathingActive) {
-            delay(1000L)
-            breathTick = (breathTick + 1) % 12
-        }
-    }
-    val breathPhase = when (breathTick) {
-        in 0..3 -> "🌬️ INHALE SLOWLY (${4 - breathTick}s)"
-        in 4..7 -> "⏸ HOLD BREATH (${8 - breathTick}s)"
-        else -> "💨 EXHALE GENTLY (${12 - breathTick}s)"
-    }
-    val breathProgress = ((breathTick % 4) + 1) / 4f
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .padding(24.dp),
-        verticalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column {
-            Spacer(modifier = Modifier.height(10.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "WELLNESS & ERGONOMIC RESET",
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.5.sp
-                )
-                IconButton(onClick = onClose) {
-                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-                }
-            }
-            HorizontalDivider(color = Color.White, thickness = 1.dp)
-            Spacer(modifier = Modifier.height(12.dp))
-
-            Text(
-                text = "CURRENT JOB: ${activeJob?.text ?: "General Desk Work"} (${activeJob?.category ?: "General"})",
-                color = Color.White.copy(alpha = 0.75f),
-                fontSize = 11.5.sp,
-                fontFamily = FontFamily.Monospace
+fun generateRandomWellnessPopup(task: TodoItem?, continuousMinutes: Int): WellnessPopupData {
+    val taskLabel = if (task != null) "${task.text} (${task.category})" else "Active Work Session"
+    return when (Random.nextInt(3)) {
+        0 -> WellnessPopupData(
+            type = "WATER",
+            title = "💧 Hydration Break ($continuousMinutes mins)",
+            subtitle = "Working on: $taskLabel",
+            bullets = listOf(
+                "You have worked continuously for $continuousMinutes minutes.",
+                "Drink a full glass of water right now to maintain focus.",
+                "Rest your eyes by looking 20 feet away for 15 seconds."
             )
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // 1. Guided Deep Breathing Pacer Box
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.2.dp, Color.White, RoundedCornerShape(4.dp))
-                    .clickable { isBreathingActive = !isBreathingActive }
-                    .padding(18.dp)
-            ) {
-                Text(
-                    text = "GUIDED 4-4-4 DEEP BREATHING",
-                    color = Color.White.copy(alpha = 0.6f),
-                    fontSize = 10.sp,
-                    letterSpacing = 1.5.sp
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                Text(
-                    text = if (isBreathingActive) breathPhase else "PAUSED (TAP TO RESUME)",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(0.75f)
-                        .height(4.dp)
-                        .background(Color.White.copy(alpha = 0.2f))
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(breathProgress)
-                            .height(4.dp)
-                            .background(Color.White)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // 2. Task-Specific Micro-Workout Box
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-                    .padding(16.dp)
-            ) {
-                Text(
-                    text = "💪 SUGGESTED WORKOUT: ${shortWorkoutTitle.uppercase(Locale.ENGLISH)}",
-                    color = Color.White,
-                    fontSize = 11.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                HorizontalDivider(color = Color.White.copy(alpha = 0.2f), thickness = 0.5.dp)
-                Spacer(modifier = Modifier.height(8.dp))
-                workoutSteps.forEach { step ->
-                    Text(
-                        text = "• $step",
-                        color = Color.White.copy(alpha = 0.9f),
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    )
-                }
-            }
-        }
-
-        // Bottom Hydration & Resume Buttons
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(46.dp)
-                    .border(1.2.dp, Color.White, RoundedCornerShape(4.dp))
-                    .clickable(onClick = onLogWater)
-            ) {
-                Text(
-                    text = "💧 LOG WATER ($waterGlassesToday)",
-                    color = Color.White,
-                    fontSize = 11.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(46.dp)
-                    .background(Color.White, RoundedCornerShape(4.dp))
-                    .clickable(onClick = onClose)
-            ) {
-                Text(
-                    text = "✓ RESUME JOB",
-                    color = Color.Black,
-                    fontSize = 11.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+        )
+        1 -> WellnessPopupData(
+            type = "BREATH",
+            title = "🌬️ Deep Breath Reset ($continuousMinutes mins)",
+            subtitle = "Working on: $taskLabel",
+            bullets = listOf(
+                "Inhale slowly through your nose for 4 seconds.",
+                "Hold your breath gently for 4 seconds.",
+                "Exhale completely for 4 seconds (Repeat 3 times)."
+            )
+        )
+        else -> {
+            val (workoutTitle, steps) = getWorkoutForTask(task)
+            WellnessPopupData(
+                type = "WORKOUT",
+                title = "💪 $workoutTitle ($continuousMinutes mins)",
+                subtitle = "Tailored for: $taskLabel",
+                bullets = steps
+            )
         }
     }
+}
+
+@Composable
+fun RandomWellnessPopupDialog(
+    popup: WellnessPopupData,
+    onDismiss: () -> Unit
+) {
+    var breathSec by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000L)
+            breathSec = (breathSec + 1) % 12
+        }
+    }
+    val breathLabel = when (breathSec) {
+        in 0..3 -> "🌬️ Inhale... (${4 - breathSec}s)"
+        in 4..7 -> "⏸ Hold... (${8 - breathSec}s)"
+        else -> "💨 Exhale... (${12 - breathSec}s)"
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF121212),
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
+        shape = RoundedCornerShape(24.dp),
+        title = {
+            Column {
+                Text(
+                    text = "20M+ CONTINUOUS WORK STREAK",
+                    color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 10.sp,
+                    letterSpacing = 1.2.sp
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = popup.title,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = popup.subtitle,
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 12.sp
+                )
+
+                if (popup.type == "BREATH") {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(CircleShape)
+                            .background(Color(0xFF242424))
+                            .padding(vertical = 10.dp)
+                    ) {
+                        Text(
+                            text = breathLabel,
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                popup.bullets.forEach { line ->
+                    Text(
+                        text = "• $line",
+                        color = Color.White.copy(alpha = 0.9f),
+                        fontSize = 12.5.sp,
+                        modifier = Modifier.padding(vertical = 2.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .clip(CircleShape)
+                    .background(Color.White)
+                    .clickable(onClick = onDismiss)
+            ) {
+                Text(
+                    text = "Done — Resume Work",
+                    color = Color.Black,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    )
 }
 
 fun getWorkoutForTask(task: TodoItem?): Pair<String, List<String>> {
@@ -1592,7 +1746,7 @@ fun getWorkoutForTask(task: TodoItem?): Pair<String, List<String>> {
         }
         combined.contains("meeting") || combined.contains("call") || combined.contains("growth") -> {
             "Decompression Walk & Stretch" to listOf(
-                "2-Minute Brisk Walk around the room to release vocal tension",
+                "2-Minute Brisk Walk around the room to release tension",
                 "30s Doorway Chest Opener Stretch for deeper breathing",
                 "5x Deep Diaphragmatic Box Breaths"
             )
@@ -1607,7 +1761,6 @@ fun getWorkoutForTask(task: TodoItem?): Pair<String, List<String>> {
     }
 }
 
-// --- COMPLETED TASKS ARCHIVE SCREEN ([ DONE ]) ---
 @Composable
 fun CompletedTasksScreen(
     completedTodos: List<TodoItem>,
@@ -1630,36 +1783,41 @@ fun CompletedTasksScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "COMPLETED TASKS (${completedTodos.size})",
+                text = "Completed (${completedTodos.size})",
                 color = Color.White,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
             )
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (completedTodos.isNotEmpty()) {
-                    Text(
-                        text = "[CLEAR ALL]",
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
+                    Box(
                         modifier = Modifier
+                            .clip(CircleShape)
+                            .background(Color(0xFF1C1C1C))
                             .clickable(onClick = onClearAll)
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text("Clear All", color = Color.White, fontSize = 11.5.sp)
+                    }
                 }
-                IconButton(onClick = onClose) {
-                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF1C1C1C))
+                        .clickable(onClick = onClose)
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(16.dp))
                 }
             }
         }
 
-        HorizontalDivider(color = Color.White.copy(alpha = 0.25f), thickness = 1.dp)
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         if (completedTodos.isEmpty()) {
             Text(
-                text = "No completed tasks yet. Single-tap any task on the home screen to complete and archive it here.",
+                text = "No completed tasks yet. Single-tap any task title on the home screen to complete and archive it.",
                 color = Color.White.copy(alpha = 0.45f),
                 fontSize = 14.sp
             )
@@ -1684,12 +1842,13 @@ fun CompletedTasksScreen(
                             Text(
                                 text = "✓ ${item.text}",
                                 color = Color.White,
-                                fontSize = 15.5.sp
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Medium
                             )
-                            Spacer(modifier = Modifier.height(3.dp))
+                            Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = "$completedTimeStr  ·  ${item.category}  ·  Plan: ${item.plannedMinutes}m",
-                                color = Color.White.copy(alpha = 0.55f),
+                                text = "$completedTimeStr · ${item.category} · ${item.plannedMinutes}m",
+                                color = Color.White.copy(alpha = 0.5f),
                                 fontSize = 11.5.sp
                             )
                         }
@@ -1702,17 +1861,15 @@ fun CompletedTasksScreen(
                             )
                         }
                     }
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.12f), thickness = 0.5.dp)
                 }
             }
         }
     }
 }
 
-// --- 4-PILLAR EXECUTIVE WORKFLOW & SUSTAINABILITY ANALYTICS DASHBOARD (📊) ---
 @Composable
 fun AnalyticsDashboardScreen(
-    categories: List<String>,
+    userCategories: List<UserCategory>,
     activeTodos: List<TodoItem>,
     completedTodos: List<TodoItem>,
     workedSecondsToday: Long,
@@ -1749,15 +1906,15 @@ fun AnalyticsDashboardScreen(
     val allTrackedTasks = completedTodos + activeTodos
     val totalPlannedAll = allTrackedTasks.sumOf { it.plannedMinutes }.coerceAtLeast(1)
 
-    val allCategoriesUsed = (categories + allTrackedTasks.map { it.category }).distinct()
-    val categoryMinutes = allCategoriesUsed.associateWith { cat ->
+    val allCategoryNames = (userCategories.map { it.name } + allTrackedTasks.map { it.category }).distinct()
+    val categoryMinutes = allCategoryNames.associateWith { cat ->
         allTrackedTasks.filter { it.category == cat }.sumOf { it.plannedMinutes }
     }
-    val lowImpactMinutes = allTrackedTasks
-        .filter { it.category.equals("Admin", ignoreCase = true) || it.category.contains("Meeting", ignoreCase = true) }
+    val highImpactSet = userCategories.filter { it.isHighImpact }.map { it.name.lowercase(Locale.ENGLISH) }.toSet()
+    val highImpactMinutes = allTrackedTasks
+        .filter { highImpactSet.contains(it.category.lowercase(Locale.ENGLISH)) }
         .sumOf { it.plannedMinutes }
-    val highImpactMinutes = (totalPlannedAll - lowImpactMinutes).coerceAtLeast(0)
-    val highImpactPct = ((highImpactMinutes * 100.0) / totalPlannedAll).roundToInt()
+    val highImpactPct = ((highImpactMinutes * 100.0) / totalPlannedAll).roundToInt().coerceIn(0, 100)
     val lowImpactPct = (100 - highImpactPct).coerceAtLeast(0)
 
     val nowMs = System.currentTimeMillis()
@@ -1771,9 +1928,9 @@ fun AnalyticsDashboardScreen(
     val addedTodayCount = prefs.getInt("added_count_$today", activeTodos.size)
     val completedTodayCount = prefs.getInt("completed_count_$today", completedToday.size)
     val capacityStatus = when {
-        addedTodayCount > completedTodayCount -> "⚠️ Influx (+$addedTodayCount) > Done ($completedTodayCount): Workload outpacing capacity"
-        completedTodayCount > addedTodayCount -> "✓ Done ($completedTodayCount) > Influx (+$addedTodayCount): Clearing backlog steadily"
-        else -> "Balanced: Influx (+$addedTodayCount) matches Completion ($completedTodayCount)"
+        addedTodayCount > completedTodayCount -> "Influx (+$addedTodayCount) > Done ($completedTodayCount): Workload outpacing capacity"
+        completedTodayCount > addedTodayCount -> "Done ($completedTodayCount) > Influx (+$addedTodayCount): Clearing backlog steadily"
+        else -> "Balanced: Influx (+$addedTodayCount) matches Done ($completedTodayCount)"
     }
 
     val waitingApprovalCount = activeTodos.count { it.blocker == "Waiting Approval" }
@@ -1793,16 +1950,16 @@ fun AnalyticsDashboardScreen(
     val stdDevHours = sqrt(variance)
 
     val burnoutRisk = when {
-        maxDailyHours > 9.5 && highImpactPct < 50 -> "HIGH RISK ⚠️ (Long hours + high low-impact load)"
+        maxDailyHours > 9.5 && highImpactPct < 50 -> "HIGH RISK (Long hours + high low-impact load)"
         maxDailyHours > 8.5 || stdDevHours > 3.0 -> "MODERATE RISK (Erratic daily spikes detected)"
-        else -> "LOW RISK ✓ (Sustainable pace & high-value alignment)"
+        else -> "LOW RISK (Sustainable pace & high-value alignment)"
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .padding(22.dp)
+            .padding(24.dp)
     ) {
         Spacer(modifier = Modifier.height(10.dp))
         Row(
@@ -1811,58 +1968,67 @@ fun AnalyticsDashboardScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "EXECUTIVE WORKFLOW ANALYTICS",
+                text = "Workflow Analytics",
                 color = Color.White,
-                fontSize = 13.5.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
             )
-            IconButton(onClick = onClose) {
-                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF1C1C1C))
+                    .clickable(onClick = onClose)
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(16.dp))
             }
         }
 
-        HorizontalDivider(color = Color.White, thickness = 1.dp)
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item {
                 AnalyticsSectionCard(
-                    title = "1. PRODUCTIVITY & CAPACITY ANALYSIS",
+                    title = "1. PRODUCTIVITY & CAPACITY",
                     lines = listOf(
-                        "Actual vs. Planned Today : ${actualMinsToday}m logged / ${plannedMinsToday}m planned ($planningAccuracy%)",
-                        "Peak Productivity Window : $peakWindowStr",
-                        "Slump Window             : $slumpWindowStr",
-                        "Task Velocity            : $dailyVelocity today  ·  $weeklyVelocity this week ($avgDailyCapacity/day)"
+                        "Actual vs Planned : ${actualMinsToday}m logged / ${plannedMinsToday}m planned ($planningAccuracy%)",
+                        "Peak Window       : $peakWindowStr",
+                        "Slump Window      : $slumpWindowStr",
+                        "Task Velocity     : $dailyVelocity today · $weeklyVelocity this week ($avgDailyCapacity/day)"
                     )
                 )
             }
 
             item {
-                val catLines = allCategoriesUsed.map { cat ->
-                    val mins = categoryMinutes[cat] ?: 0
-                    val pct = ((mins * 100.0) / totalPlannedAll).roundToInt()
-                    val bars = "█".repeat((pct / 10).coerceIn(0, 10)) + "░".repeat(10 - (pct / 10).coerceIn(0, 10))
-                    "${cat.take(15).padEnd(15)} : $bars $pct% (${mins}m)"
+                val catLines = if (allCategoryNames.isEmpty()) {
+                    listOf("No categories created yet. Tap + New to create one.")
+                } else {
+                    allCategoryNames.map { cat ->
+                        val mins = categoryMinutes[cat] ?: 0
+                        val pct = ((mins * 100.0) / totalPlannedAll).roundToInt()
+                        val bars = "█".repeat((pct / 10).coerceIn(0, 10)) + "░".repeat(10 - (pct / 10).coerceIn(0, 10))
+                        "${cat.take(14).padEnd(14)} : $bars $pct% (${mins}m)"
+                    }
                 }
                 AnalyticsSectionCard(
-                    title = "2. TIME ALLOCATION & CUSTOM CATEGORIES",
+                    title = "2. TIME ALLOCATION & CATEGORIES",
                     lines = catLines + listOf(
-                        "High vs. Low Impact      : $highImpactPct% High-Impact / $lowImpactPct% Admin-Busy"
+                        "Impact Ratio   : $highImpactPct% High-Impact / $lowImpactPct% Admin-Busy"
                     )
                 )
             }
 
             item {
                 AnalyticsSectionCard(
-                    title = "3. WORKFLOW BOTTLENECK & PENDING TASKS",
+                    title = "3. WORKFLOW BOTTLENECKS",
                     lines = listOf(
-                        "Task Aging (Pending)     : $staleOver7d Stale (>7d) · $aging3to7d Aging (3-7d) · $freshUnder3d Fresh",
-                        "Completion vs. Influx    : $capacityStatus",
-                        "Blocker Identification   : $waitingApprovalCount Waiting Approval · $unclearStepCount Unclear Step · $deprioritizedCount Deprioritized"
+                        "Task Aging     : $staleOver7d Stale (>7d) · $aging3to7d Aging (3-7d) · $freshUnder3d Fresh",
+                        "Influx vs Done : $capacityStatus",
+                        "Blockers       : $waitingApprovalCount Approval · $unclearStepCount Unclear · $deprioritizedCount Deprioritized"
                     )
                 )
             }
@@ -1870,16 +2036,16 @@ fun AnalyticsDashboardScreen(
             item {
                 val spreadStr = String.format(
                     Locale.ENGLISH,
-                    "Min %.1fh / Max %.1fh (Spread SD: %.1fh)",
+                    "Min %.1fh / Max %.1fh (SD: %.1fh)",
                     minDailyHours,
                     maxDailyHours,
                     stdDevHours
                 )
                 AnalyticsSectionCard(
-                    title = "4. WORK-LIFE BALANCE & SUSTAINABILITY",
+                    title = "4. WORK-LIFE SUSTAINABILITY",
                     lines = listOf(
-                        "Daily Variance (7d)      : $spreadStr",
-                        "Burnout Risk Indicator   : $burnoutRisk"
+                        "Daily Variance : $spreadStr",
+                        "Burnout Risk   : $burnoutRisk"
                     )
                 )
             }
@@ -1892,25 +2058,23 @@ fun AnalyticsSectionCard(title: String, lines: List<String>) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-            .padding(14.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0xFF121212))
+            .padding(16.dp)
     ) {
         Text(
             text = title,
             color = Color.White,
             fontSize = 11.5.sp,
-            fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp
         )
         Spacer(modifier = Modifier.height(8.dp))
-        HorizontalDivider(color = Color.White.copy(alpha = 0.2f), thickness = 0.5.dp)
-        Spacer(modifier = Modifier.height(8.dp))
         lines.forEach { line ->
             Text(
                 text = "• $line",
-                color = Color.White.copy(alpha = 0.9f),
-                fontSize = 11.sp,
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 11.5.sp,
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.padding(vertical = 3.dp)
             )
@@ -1928,10 +2092,19 @@ fun formatHourWindow(hour24: Int): String {
     return "${fmt(hour24)} - ${fmt(endHour)}"
 }
 
-// --- CUSTOM MONOCHROME VECTOR ICONS (📊 & 📻) ---
+fun getDayOfMonthSuffix(n: Int): String {
+    if (n in 11..13) return "th"
+    return when (n % 10) {
+        1 -> "st"
+        2 -> "nd"
+        3 -> "rd"
+        else -> "th"
+    }
+}
+
 @Composable
 fun AnalyticsVectorIcon(tint: Color) {
-    Canvas(modifier = Modifier.size(16.dp)) {
+    Canvas(modifier = Modifier.size(15.dp)) {
         val w = size.width
         val h = size.height
         drawRect(
@@ -1954,7 +2127,7 @@ fun AnalyticsVectorIcon(tint: Color) {
 
 @Composable
 fun RadioVectorIcon(tint: Color) {
-    Canvas(modifier = Modifier.size(16.dp)) {
+    Canvas(modifier = Modifier.size(15.dp)) {
         val w = size.width
         val h = size.height
         drawLine(
@@ -1994,11 +2167,11 @@ fun RadioVectorIcon(tint: Color) {
     }
 }
 
-// --- 20-MINUTE FULL-SCREEN FOCUS LOCK SCREEN ---
 @Composable
 fun FocusLockScreen(
     task: TodoItem,
     remainingSeconds: Int,
+    pulseAlpha: Float,
     onMarkCompleted: () -> Unit
 ) {
     val mins = (remainingSeconds / 60).toString().padStart(2, '0')
@@ -2016,7 +2189,7 @@ fun FocusLockScreen(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "🔒 FOCUS LOCK ACTIVE",
+                text = "FOCUS LOCK ACTIVE",
                 color = Color.White,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
@@ -2024,7 +2197,7 @@ fun FocusLockScreen(
             )
             Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = "OTHER APPS & DRAWER BLOCKED FOR 20 MINS",
+                text = "OTHER APPS BLOCKED FOR 20 MINS",
                 color = Color.White.copy(alpha = 0.5f),
                 fontSize = 10.sp,
                 letterSpacing = 1.2.sp
@@ -2070,26 +2243,19 @@ fun FocusLockScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(
-                text = "PERFORMING CURRENT JOB",
-                color = Color.White.copy(alpha = 0.55f),
-                fontSize = 10.sp,
-                letterSpacing = 2.sp
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.2.dp, Color.White, RoundedCornerShape(4.dp))
-                    .padding(16.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color(0xFF121212))
+                    .padding(18.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .width(3.dp)
-                        .height(42.dp)
-                        .background(Color.White)
+                        .size(12.dp)
+                        .alpha(pulseAlpha)
+                        .background(color = Color.White, shape = CircleShape)
                 )
                 Spacer(modifier = Modifier.width(14.dp))
                 Column {
@@ -2097,7 +2263,7 @@ fun FocusLockScreen(
                         text = task.text,
                         color = Color.White,
                         fontSize = 17.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -2108,28 +2274,28 @@ fun FocusLockScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(28.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
-                    .background(Color.White, RoundedCornerShape(4.dp))
+                    .clip(CircleShape)
+                    .background(Color.White)
                     .clickable(onClick = onMarkCompleted)
             ) {
                 Text(
-                    text = "✓ MARK TASK COMPLETED",
+                    text = "✓ Mark Task Completed",
                     color = Color.Black,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.5.sp
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
 
         Text(
-            text = "DOCK & APP DRAWER LOCKED UNTIL 00:00",
+            text = "LOCKED UNTIL TIMER EXPIRES",
             color = Color.White.copy(alpha = 0.35f),
             fontSize = 10.5.sp,
             letterSpacing = 1.5.sp,
@@ -2138,12 +2304,11 @@ fun FocusLockScreen(
     }
 }
 
-// --- ♪ MUSIC AMP WIDGET ---
 @Composable
 fun MusicampConnectedWidget(context: Context) {
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     var isPlaying by remember { mutableStateOf(audioManager.isMusicActive) }
-    var trackTitle by remember { mutableStateOf("TAP TO OPEN MUSIC / APPLE MUSIC") }
+    var trackTitle by remember { mutableStateOf("Tap to open Music / Spotify") }
     var beatWaveBars by remember { mutableStateOf(List(10) { 3 }) }
     var shuffleOn by remember { mutableStateOf(false) }
 
@@ -2179,8 +2344,8 @@ fun MusicampConnectedWidget(context: Context) {
             isPlaying = active
             if (active) {
                 beatWaveBars = List(10) { Random.nextInt(4, 21) }
-                if (trackTitle.startsWith("TAP TO")) {
-                    trackTitle = "APPLE MUSIC / SPOTIFY ACTIVE"
+                if (trackTitle.startsWith("Tap to")) {
+                    trackTitle = "Apple Music / Spotify Active"
                 }
             } else {
                 beatWaveBars = List(10) { 3 }
@@ -2192,48 +2357,19 @@ fun MusicampConnectedWidget(context: Context) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.2.dp, Color.White, RoundedCornerShape(2.dp))
-            .background(Color.Black)
-            .padding(8.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0xFF121212))
+            .padding(12.dp)
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(3.dp)
-                    .border(0.75.dp, Color.White)
-            )
-            Text(
-                text = " ♪ MUSIC AMP ",
-                color = Color.White,
-                fontSize = 9.5.sp,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 2.sp
-            )
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(3.dp)
-                    .border(0.75.dp, Color.White)
-            )
-        }
-
-        Spacer(modifier = Modifier.height(7.dp))
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(
                 modifier = Modifier
-                    .width(74.dp)
-                    .height(26.dp)
-                    .border(0.8.dp, Color.White.copy(alpha = 0.65f))
-                    .padding(horizontal = 5.dp, vertical = 3.dp),
+                    .width(68.dp)
+                    .height(24.dp)
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalAlignment = Alignment.Bottom
             ) {
@@ -2242,6 +2378,7 @@ fun MusicampConnectedWidget(context: Context) {
                         modifier = Modifier
                             .weight(1f)
                             .height(h.dp)
+                            .clip(CircleShape)
                             .background(Color.White)
                     )
                 }
@@ -2249,40 +2386,33 @@ fun MusicampConnectedWidget(context: Context) {
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            Box(
-                contentAlignment = Alignment.CenterStart,
+            Text(
+                text = trackTitle,
+                color = Color.White,
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
                     .weight(1f)
-                    .height(26.dp)
-                    .border(0.8.dp, Color.White.copy(alpha = 0.65f))
                     .clickable { openMusicPlayer(context) }
-                    .padding(horizontal = 8.dp)
-            ) {
-                Text(
-                    text = trackTitle.uppercase(Locale.ENGLISH),
-                    color = Color.White,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+            )
         }
 
-        Spacer(modifier = Modifier.height(7.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            MusicampButton(
+            MusicampPillButton(
                 label = "|<",
                 modifier = Modifier.weight(1f),
                 onClick = { sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS) }
             )
 
-            MusicampButton(
+            MusicampPillButton(
                 label = if (isPlaying) "||" else "▶",
                 modifier = Modifier.weight(1.25f),
                 onClick = {
@@ -2291,7 +2421,7 @@ fun MusicampConnectedWidget(context: Context) {
                 }
             )
 
-            MusicampButton(
+            MusicampPillButton(
                 label = ">|",
                 modifier = Modifier.weight(1f),
                 onClick = { sendMediaKey(context, KeyEvent.KEYCODE_MEDIA_NEXT) }
@@ -2301,16 +2431,15 @@ fun MusicampConnectedWidget(context: Context) {
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
                     .weight(1.1f)
-                    .height(25.dp)
-                    .border(1.dp, Color.White)
-                    .background(if (shuffleOn) Color.White else Color.Black)
+                    .height(28.dp)
+                    .clip(CircleShape)
+                    .background(if (shuffleOn) Color.White else Color(0xFF242424))
                     .clickable { shuffleOn = !shuffleOn }
             ) {
                 Text(
                     text = "SHUF",
                     color = if (shuffleOn) Color.Black else Color.White,
-                    fontSize = 9.5.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -2319,171 +2448,20 @@ fun MusicampConnectedWidget(context: Context) {
 }
 
 @Composable
-fun MusicampButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun MusicampPillButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
-            .height(25.dp)
-            .border(1.dp, Color.White)
+            .height(28.dp)
+            .clip(CircleShape)
+            .background(Color(0xFF242424))
             .clickable(onClick = onClick)
     ) {
         Text(
             text = label,
             color = Color.White,
-            fontSize = 10.5.sp,
-            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp,
             fontWeight = FontWeight.Bold
-        )
-    }
-}
-
-@Composable
-fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .border(
-                width = if (selected) 1.5.dp else 1.dp,
-                color = if (selected) Color.White else Color.White.copy(alpha = 0.35f),
-                shape = RoundedCornerShape(4.dp)
-            )
-            .background(
-                color = if (selected) Color.White.copy(alpha = 0.15f) else Color.Transparent,
-                shape = RoundedCornerShape(4.dp)
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 9.dp, vertical = 6.dp)
-    ) {
-        Text(
-            text = label,
-            fontSize = 10.sp,
-            letterSpacing = 1.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-            color = if (selected) Color.White else Color.White.copy(alpha = 0.6f)
-        )
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun AgendaRowItem(
-    title: String,
-    subtitleHighlight: String,
-    subtitleRest: String,
-    isActiveJob: Boolean?,
-    onSetActiveJob: () -> Unit,
-    onTapRemove: () -> Unit,
-    onLongPress: () -> Unit,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp)
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Box(
-                modifier = Modifier
-                    .width(if (isActiveJob == true) 4.dp else 2.5.dp)
-                    .height(36.dp)
-                    .background(if (isActiveJob == true) Color.White else Color.White.copy(alpha = 0.55f))
-            )
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            // Select Current Job Toggle Button (▶ / ▷)
-            if (isActiveJob != null) {
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(26.dp)
-                        .border(
-                            width = 1.dp,
-                            color = if (isActiveJob) Color.White else Color.White.copy(alpha = 0.35f),
-                            shape = CircleShape
-                        )
-                        .background(
-                            color = if (isActiveJob) Color.White else Color.Transparent,
-                            shape = CircleShape
-                        )
-                        .clickable(onClick = onSetActiveJob)
-                ) {
-                    Text(
-                        text = "▶",
-                        color = if (isActiveJob) Color.Black else Color.White,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                Spacer(modifier = Modifier.width(10.dp))
-            }
-
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .combinedClickable(
-                        onClick = onTapRemove,
-                        onLongClick = onLongPress
-                    )
-            ) {
-                Text(
-                    text = title,
-                    color = Color.White,
-                    fontSize = 15.5.sp,
-                    fontWeight = if (isActiveJob == true) FontWeight.Bold else FontWeight.Normal
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Row {
-                    Text(
-                        text = subtitleHighlight,
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    if (subtitleRest.isNotEmpty()) {
-                        Text(
-                            text = subtitleRest,
-                            color = Color.White.copy(alpha = 0.55f),
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
-
-            IconButton(
-                onClick = onEdit,
-                modifier = Modifier.size(28.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Edit,
-                    contentDescription = "Edit",
-                    tint = Color.White.copy(alpha = 0.6f),
-                    modifier = Modifier.size(14.dp)
-                )
-            }
-
-            IconButton(
-                onClick = onDelete,
-                modifier = Modifier.size(28.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = "Delete",
-                    tint = Color.White.copy(alpha = 0.6f),
-                    modifier = Modifier.size(14.dp)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-        HorizontalDivider(
-            color = Color.White.copy(alpha = 0.15f),
-            thickness = 0.5.dp
         )
     }
 }
@@ -2535,18 +2513,26 @@ fun AppDrawerScreen(
                     )
                 },
                 singleLine = true,
+                shape = CircleShape,
                 modifier = Modifier.weight(1f),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White,
                     focusedBorderColor = Color.White,
-                    unfocusedBorderColor = Color.White.copy(alpha = 0.4f),
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
                     cursorColor = Color.White
                 )
             )
             Spacer(modifier = Modifier.width(8.dp))
-            IconButton(onClick = onClose) {
-                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF1C1C1C))
+                    .clickable(onClick = onClose)
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White, modifier = Modifier.size(18.dp))
             }
         }
 
@@ -2569,7 +2555,6 @@ fun AppDrawerScreen(
     }
 }
 
-// --- 3-SENTENCE NEWS SUMMARIES WITH ANTI-CACHING TIMESTAMP ---
 suspend fun fetch3SentenceNewsSummaries(isTamil: Boolean): List<String> = withContext(Dispatchers.IO) {
     val summaries = mutableListOf<String>()
     runCatching {
@@ -2647,24 +2632,32 @@ suspend fun fetch3SentenceNewsSummaries(isTamil: Boolean): List<String> = withCo
     }
 }
 
-// --- PERSISTENCE & SYSTEM HELPERS ---
-fun loadUserCategories(prefs: SharedPreferences): List<String> {
-    val raw = prefs.getString("user_categories", null) ?: return DEFAULT_CATEGORIES
-    val result = mutableListOf<String>()
+fun loadUserCategories(prefs: SharedPreferences): List<UserCategory> {
+    val raw = prefs.getString("user_categories_v2", null) ?: return emptyList()
+    val result = mutableListOf<UserCategory>()
     runCatching {
         val arr = JSONArray(raw)
         for (i in 0 until arr.length()) {
-            val item = arr.getString(i).trim()
-            if (item.isNotEmpty()) result.add(item)
+            val obj = arr.getJSONObject(i)
+            val name = obj.optString("name", "").trim()
+            if (name.isNotEmpty()) {
+                result.add(UserCategory(name = name, isHighImpact = obj.optBoolean("isHighImpact", true)))
+            }
         }
     }
-    return if (result.isEmpty()) DEFAULT_CATEGORIES else result
+    return result
 }
 
-fun saveUserCategories(prefs: SharedPreferences, list: List<String>) {
+fun saveUserCategories(prefs: SharedPreferences, list: List<UserCategory>) {
     val arr = JSONArray()
-    list.forEach { arr.put(it) }
-    prefs.edit().putString("user_categories", arr.toString()).apply()
+    list.forEach { cat ->
+        val obj = JSONObject().apply {
+            put("name", cat.name)
+            put("isHighImpact", cat.isHighImpact)
+        }
+        arr.put(obj)
+    }
+    prefs.edit().putString("user_categories_v2", arr.toString()).apply()
 }
 
 fun checkAndLoadTodayWorkSeconds(prefs: SharedPreferences, todayKey: String): Long {
@@ -2779,7 +2772,7 @@ fun loadTodos(prefs: SharedPreferences, prefKey: String): List<TodoItem> {
                 TodoItem(
                     id = obj.getString("id"),
                     text = obj.getString("text"),
-                    category = obj.optString("category", "Core/Client"),
+                    category = obj.optString("category", "General"),
                     plannedMinutes = obj.optInt("plannedMinutes", 30),
                     blocker = obj.optString("blocker", "None"),
                     createdAtMs = obj.optLong("createdAtMs", System.currentTimeMillis()),
@@ -2815,7 +2808,7 @@ fun loadEvents(prefs: SharedPreferences): List<EventItem> {
                 EventItem(
                     id = obj.getString("id"),
                     title = obj.getString("title"),
-                    dateTimeText = obj.optString("dateTimeText", "Upcoming  ·  All day")
+                    dateTimeText = obj.optString("dateTimeText", "Upcoming · All day")
                 )
             )
         }
