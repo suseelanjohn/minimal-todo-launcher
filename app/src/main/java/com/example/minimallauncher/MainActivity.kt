@@ -821,7 +821,7 @@ fun LauncherScreen(activity: Activity) {
                                 val statusTag = if (isActivelyWorkingThisJob) " · Working now" else ""
 
                                 MinimalTaskRow(
-                                    modifier = Modifier.animateItem(),
+                                
                                     title = item.text,
                                     subtitle = "${item.category} · ${item.plannedMinutes}m$statusTag$ageTag$blockerTag",
                                     isWorkingTask = isActivelyWorkingThisJob,
@@ -871,7 +871,7 @@ fun LauncherScreen(activity: Activity) {
 
                                 items(events, key = { "event_${it.id}" }) { event ->
                                     MinimalTaskRow(
-                                        modifier = Modifier.animateItem(),
+                                
                                         title = event.title,
                                         subtitle = event.dateTimeText,
                                         isWorkingTask = false,
