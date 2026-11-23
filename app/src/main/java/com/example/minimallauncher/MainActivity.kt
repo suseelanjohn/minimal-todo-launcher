@@ -2,15 +2,20 @@ package com.example.minimallauncher
 
 import android.app.Activity
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.LauncherApps
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Process
 import android.os.SystemClock
+import android.os.UserHandle
+import android.os.UserManager
 import android.provider.Telephony
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -29,11 +34,9 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
@@ -47,10 +50,10 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
@@ -69,19 +72,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -130,15 +130,21 @@ data class TodoItem(
 data class EventItem(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
-    val startTime: String = "09:00",
+    val startTime: String = "12:00",
     val endTime: String = "",
-    val dateLabel: String = "Today"
+    val isCompleted: Boolean = false
 )
 
 data class AppInfo(
     val label: String,
-    val packageName: String
-)
+    val packageName: String,
+    val className: String,
+    val userHandle: UserHandle,
+    val userSerialNumber: Long,
+    val isWorkProfile: Boolean
+) {
+    val uniqueKey: String get() = "${packageName}_${className}_${userSerialNumber}"
+}
 
 data class WellnessPopupData(
     val type: String,
@@ -178,15 +184,15 @@ fun LauncherScreen(activity: Activity) {
     var completedTodos by remember { mutableStateOf(loadTodos(prefs, "completed_todos")) }
     var events by remember { mutableStateOf(loadEvents(prefs)) }
     var customAppPkg by remember { mutableStateOf(prefs.getString("custom_app_pkg", null)) }
+    var customAppClass by remember { mutableStateOf(prefs.getString("custom_app_class", null)) }
+    var customAppSerial by remember { mutableLongStateOf(prefs.getLong("custom_app_serial", -1L)) }
     var showMusicPlayer by remember { mutableStateOf(false) }
 
-    // Switchable View Mode: "TASKS" or "TIMELINE"
-    var homeSectionTab by remember { mutableStateOf("TASKS") }
+    // Switchable Home View Mode: "TASKS" vs "TIMELINE"
+    var homeViewMode by remember { mutableStateOf("TASKS") }
 
-    // Inline Bottom-Right App Search Bar State
-    var isAppSearchExpanded by remember { mutableStateOf(false) }
-    var inlineAppSearchQuery by remember { mutableStateOf("") }
-    val searchFocusRequester = remember { FocusRequester() }
+    // Always-Visible Floating App Search Bar State
+    var quickAppSearchQuery by remember { mutableStateOf("") }
 
     var currentJobId by remember { mutableStateOf(prefs.getString("current_job_id", null)) }
     val activeJobItem = remember(todos, currentJobId) {
@@ -246,6 +252,7 @@ fun LauncherScreen(activity: Activity) {
     var focusedTask by remember { mutableStateOf<TodoItem?>(null) }
     var focusRemainingSeconds by remember { mutableIntStateOf(20 * 60) }
 
+    // New Item Modal States
     var isCreatingEvent by remember { mutableStateOf(false) }
     var newTitleText by remember { mutableStateOf("") }
     var newEventStartTime by remember { mutableStateOf("12:10") }
@@ -253,6 +260,7 @@ fun LauncherScreen(activity: Activity) {
     var selectedCategoryIndex by remember { mutableIntStateOf(0) }
     var selectedPlannedIndex by remember { mutableIntStateOf(1) }
 
+    // Edit Dialog States
     var editingTodo by remember { mutableStateOf<TodoItem?>(null) }
     var editTodoText by remember { mutableStateOf("") }
     var editTodoCategory by remember { mutableStateOf("") }
@@ -264,6 +272,7 @@ fun LauncherScreen(activity: Activity) {
     var editEventStart by remember { mutableStateOf("") }
     var editEventEnd by remember { mutableStateOf("") }
 
+    // Audio News Reader
     var isReadingNews by remember { mutableStateOf(false) }
     var newsLanguageIsTamil by remember { mutableStateOf(prefs.getBoolean("news_lang_tamil", false)) }
     var hasUnheardNews by remember { mutableStateOf(false) }
@@ -310,15 +319,6 @@ fun LauncherScreen(activity: Activity) {
                 hasUnheardNews = true
             }
             delay(10 * 60 * 1000L)
-        }
-    }
-
-    LaunchedEffect(isAppSearchExpanded) {
-        if (isAppSearchExpanded) {
-            delay(100L)
-            runCatching { searchFocusRequester.requestFocus() }
-        } else {
-            inlineAppSearchQuery = ""
         }
     }
 
@@ -388,21 +388,10 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
+    // Load BOTH Personal & Work Profile Apps via LauncherApps
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
-            val pm = context.packageManager
-            val intent = Intent(Intent.ACTION_MAIN, null).apply {
-                addCategory(Intent.CATEGORY_LAUNCHER)
-            }
-            val apps = pm.queryIntentActivities(intent, 0).mapNotNull { resolveInfo ->
-                val pkg = resolveInfo.activityInfo.packageName
-                if (pkg == context.packageName) null
-                else AppInfo(
-                    label = resolveInfo.loadLabel(pm).toString(),
-                    packageName = pkg
-                )
-            }.distinctBy { it.packageName }.sortedBy { it.label.lowercase() }
-            installedApps = apps
+            installedApps = loadAllProfileApps(context)
         }
     }
 
@@ -410,10 +399,7 @@ fun LauncherScreen(activity: Activity) {
         when {
             activeWellnessPopup != null -> activeWellnessPopup = null
             focusedTask != null -> { }
-            isAppSearchExpanded -> {
-                isAppSearchExpanded = false
-                inlineAppSearchQuery = ""
-            }
+            quickAppSearchQuery.isNotEmpty() -> quickAppSearchQuery = ""
             showNewItemModal -> showNewItemModal = false
             showAnalyticsModal -> showAnalyticsModal = false
             showCompletedModal -> showCompletedModal = false
@@ -533,11 +519,17 @@ fun LauncherScreen(activity: Activity) {
                     onAppClick = { app ->
                         if (isSelectingCustomApp) {
                             customAppPkg = app.packageName
-                            prefs.edit().putString("custom_app_pkg", app.packageName).apply()
+                            customAppClass = app.className
+                            customAppSerial = app.userSerialNumber
+                            prefs.edit()
+                                .putString("custom_app_pkg", app.packageName)
+                                .putString("custom_app_class", app.className)
+                                .putLong("custom_app_serial", app.userSerialNumber)
+                                .apply()
                             isSelectingCustomApp = false
                             showDrawer = false
                         } else {
-                            launchPackage(context, app.packageName)
+                            launchAppInfo(context, app)
                             showDrawer = false
                         }
                     },
@@ -589,11 +581,15 @@ fun LauncherScreen(activity: Activity) {
                 )
                 val productivityPct = (targetProgress * 100).roundToInt()
 
-                // Compute Data for the 3 Home-Screen Micro-Charts
-                val last7DaysCompletedCounts = remember(completedTodos, todayKey) {
-                    val today = LocalDate.now()
+                val workedHours = displayedWorkSeconds / 3600
+                val workedMinutes = (displayedWorkSeconds % 3600) / 60
+                val workedFormatted = String.format(Locale.ENGLISH, "%dh %02dm", workedHours, workedMinutes)
+
+                // 7-Day Velocity & Focus Metrics for the 2-Card Charts
+                val todayDate = LocalDate.now()
+                val last7DaysVelocity = remember(completedTodos, todayDate) {
                     (6 downTo 0).map { offset ->
-                        val day = today.minusDays(offset.toLong())
+                        val day = todayDate.minusDays(offset.toLong())
                         val dayStart = day.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
                         val dayEnd = day.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
                         val count = completedTodos.count { it.completedAtMs in dayStart until dayEnd }
@@ -601,25 +597,22 @@ fun LauncherScreen(activity: Activity) {
                         label to count
                     }
                 }
-
+                val highImpactSet = remember(userCategories) {
+                    userCategories.filter { it.isHighImpact }.map { it.name.lowercase(Locale.ENGLISH) }.toSet()
+                }
                 val allTrackedTasks = completedTodos + todos
                 val totalPlannedAll = allTrackedTasks.sumOf { it.plannedMinutes }.coerceAtLeast(1)
-                val highImpactSet = userCategories.filter { it.isHighImpact }.map { it.name.lowercase(Locale.ENGLISH) }.toSet()
-                val highImpactMinutes = allTrackedTasks
+                val highImpactMins = allTrackedTasks
                     .filter { highImpactSet.contains(it.category.lowercase(Locale.ENGLISH)) }
                     .sumOf { it.plannedMinutes }
-                val highImpactPct = if (allTrackedTasks.isEmpty()) 100 else ((highImpactMinutes * 100.0) / totalPlannedAll).roundToInt().coerceIn(0, 100)
+                val highImpactPct = if (allTrackedTasks.isEmpty()) 100 else ((highImpactMins * 100f) / totalPlannedAll).roundToInt().coerceIn(0, 100)
 
-                val workedHours = displayedWorkSeconds / 3600
-                val workedMinutes = (displayedWorkSeconds % 3600) / 60
-                val workedFormatted = String.format(Locale.ENGLISH, "%dh %02dm", workedHours, workedMinutes)
-
-                // Filtered Apps for Bottom-Right Floating Search Bar
-                val matchingQuickApps = remember(installedApps, inlineAppSearchQuery) {
-                    if (inlineAppSearchQuery.isBlank()) emptyList()
+                val quickFilteredApps = remember(installedApps, quickAppSearchQuery) {
+                    if (quickAppSearchQuery.isBlank()) emptyList()
                     else installedApps.filter {
-                        it.label.contains(inlineAppSearchQuery, ignoreCase = true)
-                    }.take(5)
+                        it.label.contains(quickAppSearchQuery, ignoreCase = true) ||
+                                (it.isWorkProfile && "work".contains(quickAppSearchQuery, ignoreCase = true))
+                    }.take(6)
                 }
 
                 Box(
@@ -633,12 +626,12 @@ fun LauncherScreen(activity: Activity) {
                                 }
                             }
                         }
-                        .padding(horizontal = 22.dp, vertical = 14.dp)
+                        .padding(horizontal = 20.dp, vertical = 14.dp)
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(bottom = 64.dp)
+                            .padding(bottom = 112.dp) // Reserves exact space for Search Bar + 4 Bottom Dock Icons
                     ) {
                         Spacer(modifier = Modifier.height(6.dp))
 
@@ -648,7 +641,7 @@ fun LauncherScreen(activity: Activity) {
                             fontWeight = FontWeight.Normal,
                             color = Color.White
                         )
-                        Spacer(modifier = Modifier.height(1.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = dateFormatted,
                             fontSize = 12.sp,
@@ -663,7 +656,7 @@ fun LauncherScreen(activity: Activity) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(12.dp)
+                                    .height(13.dp)
                                     .clip(CircleShape)
                                     .background(Color(0xFF2B2B2B))
                             ) {
@@ -701,76 +694,115 @@ fun LauncherScreen(activity: Activity) {
 
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        // --- 3 COMPACT PERFORMANCE MICRO-CHARTS ROW ---
-                        PerformanceMicroChartsRow(
+                        // --- SPACIOUS, HIGH-CLARITY 2-CARD PERFORMANCE CHARTS ---
+                        SpaciousTwoCardCharts(
                             productivityPct = productivityPct,
                             animatedProgress = animatedProgress,
-                            last7DaysCounts = last7DaysCompletedCounts,
+                            last7DaysVelocity = last7DaysVelocity,
                             highImpactPct = highImpactPct,
-                            onOpenAnalytics = { showAnalyticsModal = true }
+                            onOpenFullAnalytics = { showAnalyticsModal = true }
                         )
 
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        // Rounded Pill & Circle Action Controls: ( + New ) ( Done · X )  &  (📊) (📻) (♪) (→)
+                        // --- SINGLE-LINE ALIGNED ACTION ROW: (Tasks) (Timeline) (+New) (Done)  (📊)(📻)(♪)(→) ---
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
+                                // Tasks Pill
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
                                         .clip(CircleShape)
-                                        .background(Color.White)
-                                        .clickable {
-                                            newTitleText = ""
-                                            newEventStartTime = "12:10"
-                                            newEventEndTime = "13:10"
-                                            isCreatingEvent = (homeSectionTab == "TIMELINE")
-                                            showNewItemModal = true
-                                        }
-                                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                                        .background(if (homeViewMode == "TASKS") Color.White else Color(0xFF1A1A1A))
+                                        .clickable { homeViewMode = "TASKS" }
+                                        .padding(horizontal = 11.dp, vertical = 6.5.dp)
                                 ) {
                                     Text(
-                                        text = "+ New",
-                                        color = Color.Black,
-                                        fontSize = 12.sp,
+                                        text = "Tasks",
+                                        color = if (homeViewMode == "TASKS") Color.Black else Color.White.copy(alpha = 0.8f),
+                                        fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                 }
 
+                                // Timeline Pill
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
                                         .clip(CircleShape)
-                                        .background(Color(0xFF1C1C1C))
-                                        .clickable { showCompletedModal = true }
-                                        .padding(horizontal = 13.dp, vertical = 7.dp)
+                                        .background(if (homeViewMode == "TIMELINE") Color.White else Color(0xFF1A1A1A))
+                                        .clickable { homeViewMode = "TIMELINE" }
+                                        .padding(horizontal = 11.dp, vertical = 6.5.dp)
                                 ) {
                                     Text(
-                                        text = "Done · ${completedTodos.size}",
+                                        text = "Timeline",
+                                        color = if (homeViewMode == "TIMELINE") Color.Black else Color.White.copy(alpha = 0.8f),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                // + New Pill
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF262626))
+                                        .border(1.dp, Color.White.copy(alpha = 0.35f), CircleShape)
+                                        .clickable {
+                                            newTitleText = ""
+                                            isCreatingEvent = (homeViewMode == "TIMELINE")
+                                            showNewItemModal = true
+                                        }
+                                        .padding(horizontal = 11.dp, vertical = 6.5.dp)
+                                ) {
+                                    Text(
+                                        text = "+ New",
                                         color = Color.White,
-                                        fontSize = 12.sp,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                // Done Pill
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF1A1A1A))
+                                        .clickable { showCompletedModal = true }
+                                        .padding(horizontal = 11.dp, vertical = 6.5.dp)
+                                ) {
+                                    Text(
+                                        text = "Done (${completedTodos.size})",
+                                        color = Color.White.copy(alpha = 0.8f),
+                                        fontSize = 11.sp,
                                         fontWeight = FontWeight.Medium
                                     )
                                 }
                             }
 
+                            Spacer(modifier = Modifier.width(8.dp))
+
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(7.dp)
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
-                                        .size(32.dp)
+                                        .size(30.dp)
                                         .clip(CircleShape)
-                                        .background(Color(0xFF1C1C1C))
+                                        .background(Color(0xFF1A1A1A))
                                         .clickable { showAnalyticsModal = true }
                                 ) {
                                     AnalyticsVectorIcon(tint = Color.White)
@@ -779,9 +811,9 @@ fun LauncherScreen(activity: Activity) {
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
-                                        .size(32.dp)
+                                        .size(30.dp)
                                         .clip(CircleShape)
-                                        .background(if (isReadingNews) Color.White else Color(0xFF1C1C1C))
+                                        .background(if (isReadingNews) Color.White else Color(0xFF1A1A1A))
                                         .combinedClickable(
                                             onClick = {
                                                 if (isReadingNews) {
@@ -824,8 +856,8 @@ fun LauncherScreen(activity: Activity) {
                                         Box(
                                             modifier = Modifier
                                                 .align(Alignment.TopEnd)
-                                                .padding(4.dp)
-                                                .size(6.dp)
+                                                .padding(3.dp)
+                                                .size(5.dp)
                                                 .background(Color.White, CircleShape)
                                         )
                                     }
@@ -834,15 +866,15 @@ fun LauncherScreen(activity: Activity) {
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
-                                        .size(32.dp)
+                                        .size(30.dp)
                                         .clip(CircleShape)
-                                        .background(if (showMusicPlayer) Color.White else Color(0xFF1C1C1C))
+                                        .background(if (showMusicPlayer) Color.White else Color(0xFF1A1A1A))
                                         .clickable { showMusicPlayer = !showMusicPlayer }
                                 ) {
                                     Text(
                                         text = "♪",
                                         color = if (showMusicPlayer) Color.Black else Color.White,
-                                        fontSize = 13.5.sp,
+                                        fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                 }
@@ -850,7 +882,7 @@ fun LauncherScreen(activity: Activity) {
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
-                                        .size(32.dp)
+                                        .size(30.dp)
                                         .clip(CircleShape)
                                         .background(Color.White)
                                         .clickable {
@@ -862,75 +894,32 @@ fun LauncherScreen(activity: Activity) {
                                         imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                                         contentDescription = "Open App Menu",
                                         tint = Color.Black,
-                                        modifier = Modifier.size(15.dp)
+                                        modifier = Modifier.size(14.dp)
                                     )
                                 }
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        // --- SWITCHABLE ( Tasks | Timeline ) PILL TOGGLE ---
-                        Row(
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(Color(0xFF161616))
-                                .padding(3.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Box(
-                                contentAlignment = Alignment.Center,
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(if (homeSectionTab == "TASKS") Color.White else Color.Transparent)
-                                    .clickable { homeSectionTab = "TASKS" }
-                                    .padding(horizontal = 16.dp, vertical = 6.dp)
-                            ) {
-                                Text(
-                                    text = "Tasks (${todos.size})",
-                                    color = if (homeSectionTab == "TASKS") Color.Black else Color.White.copy(alpha = 0.65f),
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-
-                            Box(
-                                contentAlignment = Alignment.Center,
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(if (homeSectionTab == "TIMELINE") Color.White else Color.Transparent)
-                                    .clickable { homeSectionTab = "TIMELINE" }
-                                    .padding(horizontal = 16.dp, vertical = 6.dp)
-                            ) {
-                                Text(
-                                    text = "Timeline (${events.size})",
-                                    color = if (homeSectionTab == "TIMELINE") Color.Black else Color.White.copy(alpha = 0.65f),
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        // --- SWITCHABLE CONTENT: TASKS LIST OR VERTICAL TIMELINE ---
+                        // --- CONTENT AREA: SWITCHES CLEANLY BETWEEN TASKS AND VERTICAL TIMELINE ---
                         AnimatedContent(
-                            targetState = homeSectionTab,
+                            targetState = homeViewMode,
                             transitionSpec = {
-                                fadeIn(tween(180)) togetherWith fadeOut(tween(150))
+                                fadeIn(tween(200)) togetherWith fadeOut(tween(150))
                             },
                             modifier = Modifier.weight(1f),
                             label = "tasks_timeline_switch"
-                        ) { tab ->
-                            if (tab == "TASKS") {
+                        ) { mode ->
+                            if (mode == "TASKS") {
                                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                                     if (todos.isEmpty()) {
                                         item {
                                             Text(
                                                 text = "Tap + New to add a task",
-                                                fontSize = 14.sp,
+                                                fontSize = 14.5.sp,
                                                 color = Color.White.copy(alpha = 0.4f),
-                                                modifier = Modifier.padding(vertical = 12.dp)
+                                                modifier = Modifier.padding(vertical = 14.dp)
                                             )
                                         }
                                     }
@@ -980,31 +969,35 @@ fun LauncherScreen(activity: Activity) {
                                     }
                                 }
                             } else {
-                                // VERTICAL TIMELINE VIEW (MATCHING REFERENCE IMAGE)
-                                VerticalTimelineView(
+                                TimelineEventsList(
                                     events = events,
                                     pendingTodos = todos,
-                                    onCompleteEvent = { event ->
-                                        events = events.filter { it.id != event.id }
+                                    onToggleEventComplete = { ev ->
+                                        events = events.map {
+                                            if (it.id == ev.id) it.copy(isCompleted = !it.isCompleted) else it
+                                        }
                                         saveEvents(prefs, events)
                                     },
-                                    onEditEvent = { event ->
-                                        editingEvent = event
-                                        editEventTitle = event.title
-                                        editEventStart = event.startTime
-                                        editEventEnd = event.endTime
+                                    onEditEvent = { ev ->
+                                        editingEvent = ev
+                                        editEventTitle = ev.title
+                                        editEventStart = ev.startTime
+                                        editEventEnd = ev.endTime
                                     },
-                                    onStartTodoFromFreeTime = { todo ->
-                                        currentJobId = todo.id
-                                        prefs.edit().putString("current_job_id", todo.id).apply()
+                                    onDeleteEvent = { ev ->
+                                        events = events.filter { it.id != ev.id }
+                                        saveEvents(prefs, events)
+                                    },
+                                    onStartTaskFromFreeTime = { taskItem ->
+                                        currentJobId = taskItem.id
+                                        prefs.edit().putString("current_job_id", taskItem.id).apply()
                                         toggleWorkTimer(true)
-                                        homeSectionTab = "TASKS"
+                                        homeViewMode = "TASKS"
                                     }
                                 )
                             }
                         }
 
-                        // Smooth Animated Expansion for Musicamp Widget
                         AnimatedVisibility(
                             visible = showMusicPlayer,
                             enter = fadeIn(tween(220)) + expandVertically(tween(240)),
@@ -1017,49 +1010,68 @@ fun LauncherScreen(activity: Activity) {
                         }
                     }
 
-                    // --- BOTTOM FLOATING INSTALLED APP SEARCH RESULTS + SEARCH BAR + 4-ICON DOCK ---
+                    // --- BOTTOM SECTION: FLOATING SEARCH BAR (ITEM 5) + 4 BOTTOM DOCK ICONS ---
                     Column(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
                     ) {
-                        // Instant App Results Popover Above Search Bar
+                        // Instant Matching Apps Pop-Up (Shows Both Personal & Work Profile Apps)
                         AnimatedVisibility(
-                            visible = isAppSearchExpanded && matchingQuickApps.isNotEmpty(),
+                            visible = quickFilteredApps.isNotEmpty(),
                             enter = fadeIn(tween(160)) + expandVertically(tween(180)),
-                            exit = fadeOut(tween(140)) + shrinkVertically(tween(160))
+                            exit = fadeOut(tween(140)) + shrinkVertically(tween(150))
                         ) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(bottom = 8.dp)
                                     .clip(RoundedCornerShape(18.dp))
-                                    .background(Color(0xFF181818))
-                                    .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(18.dp))
-                                    .padding(vertical = 6.dp, horizontal = 14.dp)
+                                    .background(Color(0xFF161616))
+                                    .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(18.dp))
+                                    .padding(horizontal = 14.dp, vertical = 6.dp)
                             ) {
-                                matchingQuickApps.forEach { app ->
+                                quickFilteredApps.forEach { app ->
                                     Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
-                                                isAppSearchExpanded = false
-                                                inlineAppSearchQuery = ""
-                                                launchPackage(context, app.packageName)
+                                                launchAppInfo(context, app)
+                                                quickAppSearchQuery = ""
                                             }
-                                            .padding(vertical = 9.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
+                                            .padding(vertical = 8.dp)
                                     ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Text(
+                                                text = app.label,
+                                                color = Color.White,
+                                                fontSize = 14.5.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                            if (app.isWorkProfile) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(CircleShape)
+                                                        .background(Color.White)
+                                                        .padding(horizontal = 7.dp, vertical = 2.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "WORK",
+                                                        color = Color.Black,
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                            }
+                                        }
                                         Text(
-                                            text = app.label,
-                                            color = Color.White,
-                                            fontSize = 14.5.sp,
-                                            fontWeight = FontWeight.Medium
-                                        )
-                                        Text(
-                                            text = "Open ↗",
-                                            color = Color.White.copy(alpha = 0.5f),
+                                            text = "Open →",
+                                            color = Color.White.copy(alpha = 0.55f),
                                             fontSize = 11.sp
                                         )
                                     }
@@ -1067,124 +1079,113 @@ fun LauncherScreen(activity: Activity) {
                             }
                         }
 
-                        // Bottom Row: Either Expanded App Search Pill OR Original 4-Icon Dock + Right Search Circle
-                        if (isAppSearchExpanded) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(46.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF1E1E1E))
-                                    .border(1.dp, Color.White.copy(alpha = 0.35f), CircleShape)
-                                    .padding(horizontal = 14.dp)
-                            ) {
+                        // Always-Visible Floating Search Pill Above the 4 Bottom Dock Icons
+                        OutlinedTextField(
+                            value = quickAppSearchQuery,
+                            onValueChange = { quickAppSearchQuery = it },
+                            placeholder = {
+                                Text(
+                                    text = "Search personal & work apps...",
+                                    color = Color.White.copy(alpha = 0.45f),
+                                    fontSize = 12.5.sp
+                                )
+                            },
+                            leadingIcon = {
                                 Icon(
                                     imageVector = Icons.Default.Search,
                                     contentDescription = "Search",
                                     tint = Color.White.copy(alpha = 0.7f),
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(17.dp)
                                 )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                BasicTextField(
-                                    value = inlineAppSearchQuery,
-                                    onValueChange = { inlineAppSearchQuery = it },
-                                    singleLine = true,
-                                    textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
-                                    cursorBrush = SolidColor(Color.White),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .focusRequester(searchFocusRequester),
-                                    decorationBox = { innerTextField ->
-                                        if (inlineAppSearchQuery.isEmpty()) {
-                                            Text(
-                                                text = "Search installed apps...",
-                                                color = Color.White.copy(alpha = 0.45f),
-                                                fontSize = 14.sp
-                                            )
-                                        }
-                                        innerTextField()
+                            },
+                            trailingIcon = {
+                                if (quickAppSearchQuery.isNotEmpty()) {
+                                    IconButton(
+                                        onClick = { quickAppSearchQuery = "" },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Close,
+                                            contentDescription = "Clear",
+                                            tint = Color.White.copy(alpha = 0.7f),
+                                            modifier = Modifier.size(15.dp)
+                                        )
                                     }
-                                )
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier
-                                        .size(28.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF2E2E2E))
-                                        .clickable {
-                                            isAppSearchExpanded = false
-                                            inlineAppSearchQuery = ""
-                                        }
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Close Search",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(14.dp)
-                                    )
                                 }
+                            },
+                            singleLine = true,
+                            shape = CircleShape,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedContainerColor = Color(0xFF161616),
+                                unfocusedContainerColor = Color(0xFF141414),
+                                focusedBorderColor = Color.White.copy(alpha = 0.55f),
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.16f),
+                                cursorColor = Color.White
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // 4 Bottom Dock Icons (Items 1 to 4)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            DockIconButton(icon = Icons.Default.Call, description = "Dialer") {
+                                openDialer(context)
                             }
-                        } else {
-                            Row(
+
+                            DockIconButton(icon = Icons.Default.Email, description = "Messages") {
+                                openMessages(context)
+                            }
+
+                            DockIconButton(icon = Icons.Default.Search, description = "Browser") {
+                                openBrowser(context)
+                            }
+
+                            Box(
+                                contentAlignment = Alignment.Center,
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                DockIconButton(icon = Icons.Default.Call, description = "Dialer") {
-                                    openDialer(context)
-                                }
-
-                                DockIconButton(icon = Icons.Default.Email, description = "Messages") {
-                                    openMessages(context)
-                                }
-
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier
-                                        .size(34.dp)
-                                        .border(1.5.dp, Color.White, RoundedCornerShape(8.dp))
-                                        .combinedClickable(
-                                            onClick = {
-                                                if (customAppPkg != null) {
-                                                    launchPackage(context, customAppPkg!!)
-                                                } else {
-                                                    isSelectingCustomApp = true
-                                                    showDrawer = true
+                                    .size(34.dp)
+                                    .border(1.5.dp, Color.White, RoundedCornerShape(8.dp))
+                                    .combinedClickable(
+                                        onClick = {
+                                            if (customAppPkg != null) {
+                                                val matchedApp = installedApps.find {
+                                                    it.packageName == customAppPkg &&
+                                                            (customAppClass == null || it.className == customAppClass) &&
+                                                            (customAppSerial == -1L || it.userSerialNumber == customAppSerial)
                                                 }
-                                            },
-                                            onLongClick = {
+                                                if (matchedApp != null) {
+                                                    launchAppInfo(context, matchedApp)
+                                                } else {
+                                                    launchPackage(context, customAppPkg!!)
+                                                }
+                                            } else {
                                                 isSelectingCustomApp = true
                                                 showDrawer = true
                                             }
-                                        )
-                                ) {
-                                    Icon(
-                                        imageVector = if (customAppPkg == null) Icons.Default.Add else Icons.Default.Star,
-                                        contentDescription = "Custom Quick App",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
+                                        },
+                                        onLongClick = {
+                                            isSelectingCustomApp = true
+                                            showDrawer = true
+                                        }
                                     )
-                                }
-
-                                // Bottom-Right Dark Circular Search Button (Matching Reference Screenshot)
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier
-                                        .size(38.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF242424))
-                                        .clickable { isAppSearchExpanded = true }
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Search,
-                                        contentDescription = "Search Installed Apps",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
+                            ) {
+                                Icon(
+                                    imageVector = if (customAppPkg == null) Icons.Default.Add else Icons.Default.Star,
+                                    contentDescription = "Custom Quick App",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
                             }
                         }
                     }
@@ -1193,7 +1194,7 @@ fun LauncherScreen(activity: Activity) {
         }
     }
 
-    // --- ROUNDED POP-UP SHEET FOR (+ New) TASK OR EVENT ---
+    // --- ROUNDED POP-UP SHEET FOR (+ New) TASK OR TIMELINE EVENT ---
     if (showNewItemModal) {
         AlertDialog(
             onDismissRequest = { showNewItemModal = false },
@@ -1230,7 +1231,7 @@ fun LauncherScreen(activity: Activity) {
                                 .padding(horizontal = 14.dp, vertical = 6.dp)
                         ) {
                             Text(
-                                text = "Event",
+                                text = "Timeline Event",
                                 color = if (isCreatingEvent) Color.Black else Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
@@ -1249,7 +1250,7 @@ fun LauncherScreen(activity: Activity) {
                         onValueChange = { newTitleText = it },
                         placeholder = {
                             Text(
-                                text = if (isCreatingEvent) "Event title (e.g., Lunch MT, Client Call)..." else "What needs to be done?",
+                                text = if (isCreatingEvent) "Event title (e.g., Lunch MT)..." else "What needs to be done?",
                                 color = Color.White.copy(alpha = 0.45f)
                             )
                         },
@@ -1393,16 +1394,16 @@ fun LauncherScreen(activity: Activity) {
                         .clickable {
                             if (newTitleText.isNotBlank()) {
                                 if (isCreatingEvent) {
-                                    val sTime = newEventStartTime.trim().ifBlank { "09:00" }
-                                    val eTime = newEventEndTime.trim()
-                                    val updatedList = (events + EventItem(
+                                    val cleanStart = newEventStartTime.trim().ifBlank { "12:00" }
+                                    val cleanEnd = newEventEndTime.trim()
+                                    val newEv = EventItem(
                                         title = newTitleText.trim(),
-                                        startTime = sTime,
-                                        endTime = eTime
-                                    )).sortedBy { parseMinutesFromHHMM(it.startTime) ?: 9999 }
-                                    events = updatedList
+                                        startTime = cleanStart,
+                                        endTime = cleanEnd
+                                    )
+                                    events = (events + newEv).sortedBy { parseTimeToMinutes(it.startTime) }
                                     saveEvents(prefs, events)
-                                    homeSectionTab = "TIMELINE"
+                                    homeViewMode = "TIMELINE"
                                     showNewItemModal = false
                                 } else {
                                     if (userCategories.isEmpty()) {
@@ -1423,7 +1424,7 @@ fun LauncherScreen(activity: Activity) {
                                         }
                                         saveTodos(prefs, "saved_todos", todos)
                                         incrementDailyStat(prefs, "added_count_${LocalDate.now()}")
-                                        homeSectionTab = "TASKS"
+                                        homeViewMode = "TASKS"
                                         showNewItemModal = false
                                     }
                                 }
@@ -1670,7 +1671,6 @@ fun LauncherScreen(activity: Activity) {
         )
     }
 
-    // --- EDIT TIMELINE EVENT DIALOG ---
     if (editingEvent != null) {
         AlertDialog(
             onDismissRequest = { editingEvent = null },
@@ -1737,11 +1737,11 @@ fun LauncherScreen(activity: Activity) {
                                     if (it.id == current.id) {
                                         it.copy(
                                             title = editEventTitle.trim(),
-                                            startTime = editEventStart.trim().ifBlank { "09:00" },
+                                            startTime = editEventStart.trim().ifBlank { "12:00" },
                                             endTime = editEventEnd.trim()
                                         )
                                     } else it
-                                }.sortedBy { parseMinutesFromHHMM(it.startTime) ?: 9999 }
+                                }.sortedBy { parseTimeToMinutes(it.startTime) }
                                 saveEvents(prefs, events)
                             }
                             editingEvent = null
@@ -1760,195 +1760,258 @@ fun LauncherScreen(activity: Activity) {
     }
 }
 
-// --- 3 COMPACT PERFORMANCE MICRO-CHARTS ROW (INSPIRED BY REFERENCE IMAGE) ---
+// --- SPACIOUS, VISUALLY PLEASING 2-CARD PERFORMANCE CHARTS ---
 @Composable
-fun PerformanceMicroChartsRow(
+fun SpaciousTwoCardCharts(
     productivityPct: Int,
     animatedProgress: Float,
-    last7DaysCounts: List<Pair<String, Int>>,
+    last7DaysVelocity: List<Pair<String, Int>>,
     highImpactPct: Int,
-    onOpenAnalytics: () -> Unit
+    onOpenFullAnalytics: () -> Unit
 ) {
+    val maxVelocity = (last7DaysVelocity.maxOfOrNull { it.second } ?: 1).coerceAtLeast(1)
+    val avgPerDay = String.format(
+        Locale.ENGLISH,
+        "%.1f/d",
+        last7DaysVelocity.sumOf { it.second } / 7.0
+    )
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onOpenAnalytics),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .clickable(onClick = onOpenFullAnalytics),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // 1. Circular Ring Gauge (Like the top-right widget in the reference screenshot)
+        // Card 1: 7-Day Velocity Smooth Wave Curve
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
+            verticalArrangement = Arrangement.SpaceBetween,
             modifier = Modifier
-                .weight(0.95f)
-                .height(68.dp)
-                .clip(RoundedCornerShape(16.dp))
+                .weight(1.15f)
+                .height(94.dp)
+                .clip(RoundedCornerShape(18.dp))
                 .background(Color(0xFF141414))
-                .padding(8.dp)
+                .padding(horizontal = 14.dp, vertical = 11.dp)
         ) {
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(38.dp)) {
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    drawCircle(
-                        color = Color.White.copy(alpha = 0.16f),
-                        style = Stroke(width = 3.5.dp.toPx())
-                    )
-                    drawArc(
-                        color = Color.White,
-                        startAngle = -90f,
-                        sweepAngle = 360f * animatedProgress,
-                        useCenter = false,
-                        style = Stroke(width = 3.5.dp.toPx(), cap = StrokeCap.Round)
-                    )
-                }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = "$productivityPct%",
-                    color = Color.White,
+                    text = "7-DAY VELOCITY",
+                    color = Color.White.copy(alpha = 0.6f),
                     fontSize = 9.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.8.sp
+                )
+                Text(
+                    text = avgPerDay,
+                    color = Color.White,
+                    fontSize = 10.5.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
-            Spacer(modifier = Modifier.height(3.dp))
-            Text(
-                text = "GOAL",
-                color = Color.White.copy(alpha = 0.55f),
-                fontSize = 8.5.sp,
-                letterSpacing = 1.sp
-            )
-        }
 
-        // 2. 7-Day Velocity Mini Spark-Bars
-        Column(
-            verticalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier
-                .weight(1.25f)
-                .height(68.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color(0xFF141414))
-                .padding(horizontal = 10.dp, vertical = 8.dp)
-        ) {
-            Text(
-                text = "7D VELOCITY",
-                color = Color.White.copy(alpha = 0.55f),
-                fontSize = 8.5.sp,
-                letterSpacing = 0.8.sp
-            )
-            val maxCount = (last7DaysCounts.maxOfOrNull { it.second } ?: 1).coerceAtLeast(1)
-            Row(
+            // Smooth White Curve Chart with Point Dots
+            Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(26.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Bottom
+                    .height(34.dp)
             ) {
-                last7DaysCounts.forEach { (dayLabel, count) ->
-                    val ratio = (count.toFloat() / maxCount.toFloat()).coerceIn(0.15f, 1f)
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(
-                            modifier = Modifier
-                                .width(6.dp)
-                                .height((18.dp * ratio))
-                                .clip(CircleShape)
-                                .background(if (count > 0) Color.White else Color.White.copy(alpha = 0.2f))
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = dayLabel,
-                            color = Color.White.copy(alpha = 0.5f),
-                            fontSize = 7.sp
-                        )
+                val points = last7DaysVelocity.mapIndexed { idx, (_, count) ->
+                    val x = if (last7DaysVelocity.size > 1) {
+                        (size.width / (last7DaysVelocity.size - 1)) * idx
+                    } else size.width / 2f
+                    val ratio = (count.toFloat() / maxVelocity.toFloat()).coerceIn(0.08f, 1f)
+                    val y = size.height - (size.height * 0.78f * ratio) - 4.dp.toPx()
+                    Offset(x, y)
+                }
+
+                if (points.size >= 2) {
+                    val path = Path().apply {
+                        moveTo(points.first().x, points.first().y)
+                        for (i in 0 until points.size - 1) {
+                            val p0 = points[i]
+                            val p1 = points[i + 1]
+                            val midX = (p0.x + p1.x) / 2f
+                            cubicTo(midX, p0.y, midX, p1.y, p1.x, p1.y)
+                        }
                     }
+                    drawPath(
+                        path = path,
+                        color = Color.White,
+                        style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+                    )
+                }
+
+                points.forEachIndexed { idx, pt ->
+                    val count = last7DaysVelocity[idx].second
+                    drawCircle(
+                        color = if (count > 0) Color.White else Color.White.copy(alpha = 0.35f),
+                        radius = if (count > 0) 3.dp.toPx() else 2.dp.toPx(),
+                        center = pt
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                last7DaysVelocity.forEach { (dayLabel, _) ->
+                    Text(
+                        text = dayLabel,
+                        color = Color.White.copy(alpha = 0.55f),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                 }
             }
         }
 
-        // 3. Core High-Impact Ratio Micro-Bar
+        // Card 2: Daily Goal Ring + Core Focus Ratio
         Column(
             verticalArrangement = Arrangement.SpaceBetween,
             modifier = Modifier
-                .weight(1.05f)
-                .height(68.dp)
-                .clip(RoundedCornerShape(16.dp))
+                .weight(1f)
+                .height(94.dp)
+                .clip(RoundedCornerShape(18.dp))
                 .background(Color(0xFF141414))
-                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .padding(horizontal = 14.dp, vertical = 11.dp)
         ) {
-            Text(
-                text = "CORE FOCUS",
-                color = Color.White.copy(alpha = 0.55f),
-                fontSize = 8.5.sp,
-                letterSpacing = 0.8.sp
-            )
-            Text(
-                text = "$highImpactPct%",
-                color = Color.White,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(5.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.18f))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.size(38.dp)) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawCircle(
+                            color = Color.White.copy(alpha = 0.16f),
+                            style = Stroke(width = 3.5.dp.toPx())
+                        )
+                        drawArc(
+                            color = Color.White,
+                            startAngle = -90f,
+                            sweepAngle = 360f * animatedProgress,
+                            useCenter = false,
+                            style = Stroke(width = 3.5.dp.toPx(), cap = StrokeCap.Round)
+                        )
+                    }
+                    Text(
+                        text = "$productivityPct%",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Column {
+                    Text(
+                        text = "DAILY GOAL",
+                        color = Color.White.copy(alpha = 0.55f),
+                        fontSize = 9.sp,
+                        letterSpacing = 0.7.sp
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "$productivityPct% Done",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "CORE FOCUS",
+                        color = Color.White.copy(alpha = 0.55f),
+                        fontSize = 9.sp,
+                        letterSpacing = 0.7.sp
+                    )
+                    Text(
+                        text = "$highImpactPct%",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth((highImpactPct / 100f).coerceIn(0.08f, 1f))
-                        .fillMaxHeight()
+                        .fillMaxWidth()
+                        .height(5.dp)
                         .clip(CircleShape)
-                        .background(Color.White)
-                )
+                        .background(Color.White.copy(alpha = 0.18f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth((highImpactPct / 100f).coerceIn(0.06f, 1f))
+                            .fillMaxHeight()
+                            .clip(CircleShape)
+                            .background(Color.White)
+                    )
+                }
             }
         }
     }
 }
 
-// --- VERTICAL TIMELINE VIEW WITH FREE-TIME GAP CARD (MATCHING REFERENCE SCREENSHOT) ---
+// --- VERTICAL TIMELINE EVENTS LIST WITH AUTOMATIC "FREE TIME" GAP CARDS ---
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun VerticalTimelineView(
+fun TimelineEventsList(
     events: List<EventItem>,
     pendingTodos: List<TodoItem>,
-    onCompleteEvent: (EventItem) -> Unit,
+    onToggleEventComplete: (EventItem) -> Unit,
     onEditEvent: (EventItem) -> Unit,
-    onStartTodoFromFreeTime: (TodoItem) -> Unit
+    onDeleteEvent: (EventItem) -> Unit,
+    onStartTaskFromFreeTime: (TodoItem) -> Unit
 ) {
-    if (events.isEmpty()) {
-        Column(modifier = Modifier.fillMaxSize().padding(vertical = 12.dp)) {
-            Text(
-                text = "No timeline events today. Tap + New → Event to schedule.",
-                color = Color.White.copy(alpha = 0.45f),
-                fontSize = 13.5.sp
-            )
-        }
-        return
+    val sortedEvents = remember(events) {
+        events.sortedBy { parseTimeToMinutes(it.startTime) }
     }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(0.dp)
-    ) {
-        items(events.size) { index ->
-            val event = events[index]
-            val nextEvent = events.getOrNull(index + 1)
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        if (sortedEvents.isEmpty()) {
+            item {
+                Text(
+                    text = "No timeline events yet. Tap + New to schedule your day.",
+                    fontSize = 14.sp,
+                    color = Color.White.copy(alpha = 0.4f),
+                    modifier = Modifier.padding(vertical = 14.dp)
+                )
+            }
+        }
 
-            // 1. Event Timeline Node + Rounded Event Card
+        itemsIndexed(sortedEvents, key = { _, ev -> "tl_${ev.id}" }) { index, event ->
+            val timeRangeLabel = if (event.endTime.isNotBlank()) {
+                "${event.startTime} ~ ${event.endTime}"
+            } else {
+                event.startTime
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(IntrinsicSize.Min),
-                verticalAlignment = Alignment.CenterVertically
+                    .height(IntrinsicSize.Min)
             ) {
-                // Left Time Column
                 Text(
                     text = event.startTime,
-                    color = Color.White.copy(alpha = 0.55f),
-                    fontSize = 11.sp,
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 11.5.sp,
                     fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.width(42.dp)
+                    modifier = Modifier
+                        .width(44.dp)
+                        .padding(top = 14.dp)
                 )
 
-                // Vertical Timeline Line + Dot
-                Box(
-                    contentAlignment = Alignment.Center,
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier
                         .width(20.dp)
                         .fillMaxHeight()
@@ -1956,84 +2019,107 @@ fun VerticalTimelineView(
                     Box(
                         modifier = Modifier
                             .width(1.dp)
-                            .fillMaxHeight()
+                            .height(16.dp)
                             .background(Color.White.copy(alpha = 0.25f))
                     )
                     Box(
                         modifier = Modifier
                             .size(7.dp)
-                            .clip(CircleShape)
-                            .background(Color.White)
+                            .background(Color.White, CircleShape)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .weight(1f)
+                            .background(Color.White.copy(alpha = 0.25f))
                     )
                 }
 
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(8.dp))
 
-                // Rounded Dark Event Card with Completion Circle Ring on Right
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .weight(1f)
                         .padding(vertical = 5.dp)
                         .clip(RoundedCornerShape(18.dp))
-                        .background(Color(0xFF161616))
-                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(18.dp))
-                        .clickable { onEditEvent(event) }
+                        .background(Color(0xFF141414))
+                        .combinedClickable(
+                            onClick = { onToggleEventComplete(event) },
+                            onLongClick = { onEditEvent(event) }
+                        )
                         .padding(horizontal = 16.dp, vertical = 12.dp)
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        val timeRange = if (event.endTime.isNotBlank()) "${event.startTime} ~ ${event.endTime}" else event.startTime
                         Text(
-                            text = timeRange,
+                            text = timeRangeLabel,
                             color = Color.White.copy(alpha = 0.55f),
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
+                            fontSize = 11.sp
                         )
-                        Spacer(modifier = Modifier.height(3.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = event.title,
-                            color = Color.White,
-                            fontSize = 15.sp,
+                            color = if (event.isCompleted) Color.White.copy(alpha = 0.45f) else Color.White,
+                            fontSize = 15.5.sp,
                             fontWeight = FontWeight.SemiBold
                         )
                     }
 
-                    // Circular Completion Ring (Matches Reference Image)
                     Box(
+                        contentAlignment = Alignment.Center,
                         modifier = Modifier
                             .size(22.dp)
-                            .clip(CircleShape)
-                            .border(1.5.dp, Color.White.copy(alpha = 0.8f), CircleShape)
-                            .clickable { onCompleteEvent(event) }
-                    )
+                            .border(1.5.dp, Color.White, CircleShape)
+                            .background(
+                                color = if (event.isCompleted) Color.White else Color.Transparent,
+                                shape = CircleShape
+                            )
+                    ) {
+                        if (event.isCompleted) {
+                            Text("✓", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+                    IconButton(onClick = { onDeleteEvent(event) }, modifier = Modifier.size(22.dp)) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = "Delete Event",
+                            tint = Color.White.copy(alpha = 0.4f),
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
                 }
             }
 
-            // 2. Check for Free Time Gap Between This Event and Next Event (>= 2 Hours)
-            if (nextEvent != null) {
-                val endMins = parseMinutesFromHHMM(event.endTime.ifBlank { event.startTime })
-                val nextStartMins = parseMinutesFromHHMM(nextEvent.startTime)
-                if (endMins != null && nextStartMins != null && (nextStartMins - endMins) >= 120) {
-                    val freeHours = (nextStartMins - endMins) / 60
-                    val endStr = event.endTime.ifBlank { event.startTime }
+            // Automatic "Free Time" Gap Card Between Consecutive Events (If Gap >= 60 mins)
+            if (index < sortedEvents.lastIndex) {
+                val nextEvent = sortedEvents[index + 1]
+                val currentEndStr = event.endTime.ifBlank { event.startTime }
+                val currentEndMins = parseTimeToMinutes(currentEndStr)
+                val nextStartMins = parseTimeToMinutes(nextEvent.startTime)
+                val gapMins = nextStartMins - currentEndMins
 
+                if (gapMins >= 60) {
+                    val gapHours = gapMins / 60
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(IntrinsicSize.Min),
-                        verticalAlignment = Alignment.CenterVertically
+                            .height(IntrinsicSize.Min)
                     ) {
                         Column(
-                            modifier = Modifier.width(42.dp),
-                            verticalArrangement = Arrangement.SpaceBetween
+                            verticalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier
+                                .width(44.dp)
+                                .fillMaxHeight()
+                                .padding(vertical = 10.dp)
                         ) {
                             Text(
-                                text = endStr,
+                                text = currentEndStr,
                                 color = Color.White.copy(alpha = 0.4f),
                                 fontSize = 10.sp,
                                 fontFamily = FontFamily.Monospace
                             )
-                            Spacer(modifier = Modifier.height(28.dp))
                             Text(
                                 text = nextEvent.startTime,
                                 color = Color.White.copy(alpha = 0.4f),
@@ -2042,8 +2128,8 @@ fun VerticalTimelineView(
                             )
                         }
 
-                        Box(
-                            contentAlignment = Alignment.Center,
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
                                 .width(20.dp)
                                 .fillMaxHeight()
@@ -2051,51 +2137,46 @@ fun VerticalTimelineView(
                             Box(
                                 modifier = Modifier
                                     .width(1.dp)
-                                    .fillMaxHeight()
+                                    .weight(1f)
                                     .background(Color.White.copy(alpha = 0.25f))
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
 
-                        // Free Time Gap Container Card (Matching Reference Image)
                         Column(
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(vertical = 5.dp)
                                 .clip(RoundedCornerShape(18.dp))
-                                .background(Color(0xFF111111))
+                                .background(Color(0xFF101010))
                                 .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(18.dp))
                                 .padding(14.dp)
                         ) {
                             Text(
-                                text = "🕒 Free Time",
-                                color = Color.White.copy(alpha = 0.55f),
-                                fontSize = 11.sp
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "$freeHours hrs",
-                                color = Color.White,
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.Bold
+                                text = "🕒 Free Time · $gapHours hrs",
+                                color = Color.White.copy(alpha = 0.7f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
                             )
                             if (pendingTodos.isNotEmpty()) {
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Row(
-                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    pendingTodos.take(4).forEach { todo ->
+                                    pendingTodos.take(4).forEach { task ->
                                         Box(
                                             modifier = Modifier
-                                                .clip(RoundedCornerShape(10.dp))
+                                                .clip(CircleShape)
                                                 .background(Color(0xFF222222))
-                                                .clickable { onStartTodoFromFreeTime(todo) }
-                                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                                .clickable { onStartTaskFromFreeTime(task) }
+                                                .padding(horizontal = 10.dp, vertical = 5.dp)
                                         ) {
                                             Text(
-                                                text = todo.text,
+                                                text = task.text,
                                                 color = Color.White,
                                                 fontSize = 11.sp,
                                                 maxLines = 1,
@@ -2113,12 +2194,11 @@ fun VerticalTimelineView(
     }
 }
 
-fun parseMinutesFromHHMM(timeStr: String): Int? {
+fun parseTimeToMinutes(timeStr: String): Int {
     val parts = timeStr.trim().split(":")
-    if (parts.size != 2) return null
-    val h = parts[0].toIntOrNull() ?: return null
-    val m = parts[1].toIntOrNull() ?: return null
-    return h * 60 + m
+    val h = parts.getOrNull(0)?.toIntOrNull() ?: 12
+    val m = parts.getOrNull(1)?.toIntOrNull() ?: 0
+    return (h.coerceIn(0, 23) * 60) + m.coerceIn(0, 59)
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -2141,7 +2221,7 @@ fun MinimalTaskRow(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 9.dp)
+            .padding(vertical = 8.dp)
     ) {
         if (showDot) {
             Box(
@@ -2180,14 +2260,14 @@ fun MinimalTaskRow(
             Text(
                 text = title,
                 color = Color.White,
-                fontSize = 17.sp,
+                fontSize = 16.5.sp,
                 fontWeight = if (isWorkingTask) FontWeight.Bold else FontWeight.SemiBold
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = subtitle,
                 color = if (isWorkingTask) Color.White.copy(alpha = 0.85f) else Color.White.copy(alpha = 0.5f),
-                fontSize = 11.5.sp,
+                fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -2736,7 +2816,7 @@ fun getDayOfMonthSuffix(n: Int): String {
 
 @Composable
 fun AnalyticsVectorIcon(tint: Color) {
-    Canvas(modifier = Modifier.size(15.dp)) {
+    Canvas(modifier = Modifier.size(14.dp)) {
         val w = size.width
         val h = size.height
         drawRect(
@@ -2759,7 +2839,7 @@ fun AnalyticsVectorIcon(tint: Color) {
 
 @Composable
 fun RadioVectorIcon(tint: Color) {
-    Canvas(modifier = Modifier.size(15.dp)) {
+    Canvas(modifier = Modifier.size(14.dp)) {
         val w = size.width
         val h = size.height
         drawLine(
@@ -3110,6 +3190,7 @@ fun DockIconButton(icon: ImageVector, description: String, onClick: () -> Unit) 
     }
 }
 
+// --- FULL APP DRAWER (SHOWS BOTH PERSONAL & WORK PROFILE APPS WITH [WORK] BADGE) ---
 @Composable
 fun AppDrawerScreen(
     apps: List<AppInfo>,
@@ -3120,7 +3201,10 @@ fun AppDrawerScreen(
     var searchQuery by remember { mutableStateOf("") }
     val filteredApps = remember(apps, searchQuery) {
         if (searchQuery.isBlank()) apps
-        else apps.filter { it.label.contains(searchQuery, ignoreCase = true) }
+        else apps.filter {
+            it.label.contains(searchQuery, ignoreCase = true) ||
+                    (it.isWorkProfile && "work".contains(searchQuery, ignoreCase = true))
+        }
     }
 
     Column(
@@ -3140,7 +3224,7 @@ fun AppDrawerScreen(
                 onValueChange = { searchQuery = it },
                 placeholder = {
                     Text(
-                        text = if (isSelectionMode) "Select quick app..." else "Search apps...",
+                        text = if (isSelectionMode) "Select quick app..." else "Search personal & work apps...",
                         color = Color.White.copy(alpha = 0.45f)
                     )
                 },
@@ -3171,20 +3255,110 @@ fun AppDrawerScreen(
         Spacer(modifier = Modifier.height(16.dp))
 
         LazyColumn(modifier = Modifier.fillMaxSize()) {
-            items(filteredApps, key = { it.packageName }) { app ->
-                Text(
-                    text = app.label,
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Light,
+            items(filteredApps, key = { it.uniqueKey }) { app ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { onAppClick(app) }
                         .padding(vertical = 12.dp)
+                ) {
+                    Text(
+                        text = app.label,
+                        color = Color.White,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Light
+                    )
+                    if (app.isWorkProfile) {
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(Color.White)
+                                .padding(horizontal = 9.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = "WORK",
+                                color = Color.Black,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- MULTI-PROFILE APP LOADER & LAUNCHER (PERSONAL + ANDROID WORK PROFILE) ---
+fun loadAllProfileApps(context: Context): List<AppInfo> {
+    val launcherApps = context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as? LauncherApps
+    val userManager = context.getSystemService(Context.USER_SERVICE) as? UserManager
+    val myUserHandle = Process.myUserHandle()
+    val result = mutableListOf<AppInfo>()
+
+    if (launcherApps != null && userManager != null) {
+        val profiles = runCatching { launcherApps.profiles }.getOrElse { listOf(myUserHandle) }
+        for (profile in profiles) {
+            val isWork = profile != myUserHandle
+            val serial = userManager.getSerialNumberForUser(profile)
+            val activities = runCatching { launcherApps.getActivityList(null, profile) }.getOrElse { emptyList() }
+            for (info in activities) {
+                val pkg = info.componentName.packageName
+                if (pkg == context.packageName) continue
+                result.add(
+                    AppInfo(
+                        label = info.label.toString(),
+                        packageName = pkg,
+                        className = info.componentName.className,
+                        userHandle = profile,
+                        userSerialNumber = serial,
+                        isWorkProfile = isWork
+                    )
                 )
             }
         }
     }
+
+    if (result.isEmpty()) {
+        val pm = context.packageManager
+        val intent = Intent(Intent.ACTION_MAIN, null).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+        pm.queryIntentActivities(intent, 0).forEach { resolveInfo ->
+            val pkg = resolveInfo.activityInfo.packageName
+            if (pkg != context.packageName) {
+                result.add(
+                    AppInfo(
+                        label = resolveInfo.loadLabel(pm).toString(),
+                        packageName = pkg,
+                        className = resolveInfo.activityInfo.name,
+                        userHandle = myUserHandle,
+                        userSerialNumber = 0L,
+                        isWorkProfile = false
+                    )
+                )
+            }
+        }
+    }
+
+    return result
+        .distinctBy { it.uniqueKey }
+        .sortedWith(compareBy({ it.label.lowercase(Locale.ENGLISH) }, { it.isWorkProfile }))
+}
+
+fun launchAppInfo(context: Context, app: AppInfo) {
+    val launcherApps = context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as? LauncherApps
+    if (launcherApps != null) {
+        val component = ComponentName(app.packageName, app.className)
+        val launched = runCatching {
+            launcherApps.startMainActivity(component, app.userHandle, null, null)
+            true
+        }.getOrDefault(false)
+        if (launched) return
+    }
+    launchPackage(context, app.packageName)
 }
 
 suspend fun fetch3SentenceNewsSummaries(isTamil: Boolean): List<String> = withContext(Dispatchers.IO) {
@@ -3230,13 +3404,13 @@ suspend fun fetch3SentenceNewsSummaries(isTamil: Boolean): List<String> = withCo
                         .replace(Regex("<[^>]*>"), " ")
                         .replace("&nbsp;", " ")
                         .replace("&amp;", "&")
-                        .replace("&quot;", "\"")
-                        .replace(Regex("\\s+"), " ")
+                        .replace("&quot;", """)
+                        .replace(Regex("\s+"), " ")
                         .trim()
 
                     if (cleanTitle.isNotEmpty()) {
                         val extraSentences = plainDesc
-                            .split(Regex("(?<=[.!?])\\s+"))
+                            .split(Regex("(?<=[.!?])\s+"))
                             .filter { it.length > 20 && !it.contains(cleanTitle.take(15), ignoreCase = true) }
                             .take(2)
 
@@ -3360,6 +3534,13 @@ fun openMessages(context: Context) {
     }
 }
 
+fun openBrowser(context: Context) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com")).apply {
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+    }
+    runCatching { context.startActivity(intent) }
+}
+
 fun launchPackage(context: Context, packageName: String) {
     val intent = context.packageManager.getLaunchIntentForPackage(packageName)?.apply {
         flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -3417,15 +3598,15 @@ fun saveEvents(prefs: SharedPreferences, list: List<EventItem>) {
             put("title", item.title)
             put("startTime", item.startTime)
             put("endTime", item.endTime)
-            put("dateLabel", item.dateLabel)
+            put("isCompleted", item.isCompleted)
         }
         array.put(obj)
     }
-    prefs.edit().putString("saved_events", array.toString()).apply()
+    prefs.edit().putString("saved_events_v2", array.toString()).apply()
 }
 
 fun loadEvents(prefs: SharedPreferences): List<EventItem> {
-    val raw = prefs.getString("saved_events", null) ?: return emptyList()
+    val raw = prefs.getString("saved_events_v2", null) ?: return emptyList()
     val result = mutableListOf<EventItem>()
     runCatching {
         val array = JSONArray(raw)
@@ -3435,9 +3616,9 @@ fun loadEvents(prefs: SharedPreferences): List<EventItem> {
                 EventItem(
                     id = obj.getString("id"),
                     title = obj.getString("title"),
-                    startTime = obj.optString("startTime", "09:00"),
+                    startTime = obj.optString("startTime", "12:00"),
                     endTime = obj.optString("endTime", ""),
-                    dateLabel = obj.optString("dateLabel", "Today")
+                    isCompleted = obj.optBoolean("isCompleted", false)
                 )
             )
         }
