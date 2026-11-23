@@ -3404,13 +3404,13 @@ suspend fun fetch3SentenceNewsSummaries(isTamil: Boolean): List<String> = withCo
                         .replace(Regex("<[^>]*>"), " ")
                         .replace("&nbsp;", " ")
                         .replace("&amp;", "&")
-                        .replace("&quot;", """)
-                        .replace(Regex("\s+"), " ")
+                        .replace("&quot;", "\"")
+                        .replace(Regex("\\s+"), " ")
                         .trim()
 
                     if (cleanTitle.isNotEmpty()) {
                         val extraSentences = plainDesc
-                            .split(Regex("(?<=[.!?])\s+"))
+                            .split(Regex("(?<=[.!?])\\s+"))
                             .filter { it.length > 20 && !it.contains(cleanTitle.take(15), ignoreCase = true) }
                             .take(2)
 
