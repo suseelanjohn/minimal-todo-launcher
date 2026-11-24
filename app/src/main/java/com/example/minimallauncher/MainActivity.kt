@@ -34,9 +34,11 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
@@ -192,6 +194,7 @@ fun LauncherScreen(activity: Activity) {
     var homeViewMode by remember { mutableStateOf("TASKS") }
 
     // Always-Visible Floating App Search Bar State
+    var isSearchExpanded by remember { mutableStateOf(false) }
     var quickAppSearchQuery by remember { mutableStateOf("") }
 
     var currentJobId by remember { mutableStateOf(prefs.getString("current_job_id", null)) }
@@ -399,7 +402,10 @@ fun LauncherScreen(activity: Activity) {
         when {
             activeWellnessPopup != null -> activeWellnessPopup = null
             focusedTask != null -> { }
-            quickAppSearchQuery.isNotEmpty() -> quickAppSearchQuery = ""
+            isSearchExpanded || quickAppSearchQuery.isNotEmpty() -> {
+                isSearchExpanded = false
+                quickAppSearchQuery = ""
+            }
             showNewItemModal -> showNewItemModal = false
             showAnalyticsModal -> showAnalyticsModal = false
             showCompletedModal -> showCompletedModal = false
@@ -631,7 +637,7 @@ fun LauncherScreen(activity: Activity) {
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(bottom = 112.dp) // Reserves exact space for Search Bar + 4 Bottom Dock Icons
+                            .padding(bottom = 96.dp)
                     ) {
                         Spacer(modifier = Modifier.height(6.dp))
 
@@ -1040,6 +1046,7 @@ fun LauncherScreen(activity: Activity) {
                                             .clickable {
                                                 launchAppInfo(context, app)
                                                 quickAppSearchQuery = ""
+                                                isSearchExpanded = false
                                             }
                                             .padding(vertical = 8.dp)
                                     ) {
@@ -1079,59 +1086,107 @@ fun LauncherScreen(activity: Activity) {
                             }
                         }
 
-                        // Always-Visible Floating Search Pill Above the 4 Bottom Dock Icons
-                        OutlinedTextField(
-                            value = quickAppSearchQuery,
-                            onValueChange = { quickAppSearchQuery = it },
-                            placeholder = {
-                                Text(
-                                    text = "Search personal & work apps...",
-                                    color = Color.White.copy(alpha = 0.45f),
-                                    fontSize = 12.5.sp
-                                )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.Search,
-                                    contentDescription = "Search",
-                                    tint = Color.White.copy(alpha = 0.7f),
-                                    modifier = Modifier.size(17.dp)
-                                )
-                            },
-                            trailingIcon = {
-                                if (quickAppSearchQuery.isNotEmpty()) {
-                                    IconButton(
-                                        onClick = { quickAppSearchQuery = "" },
-                                        modifier = Modifier.size(24.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Close,
-                                            contentDescription = "Clear",
-                                            tint = Color.White.copy(alpha = 0.7f),
-                                            modifier = Modifier.size(15.dp)
-                                        )
-                                    }
-                                }
-                            },
-                            singleLine = true,
-                            shape = CircleShape,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedContainerColor = Color(0xFF161616),
-                                unfocusedContainerColor = Color(0xFF141414),
-                                focusedBorderColor = Color.White.copy(alpha = 0.55f),
-                                unfocusedBorderColor = Color.White.copy(alpha = 0.16f),
-                                cursorColor = Color.White
-                            ),
+                        // Floating Search Button -> Smoothly Expands into App Search Bar
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(48.dp)
-                        )
+                                .padding(horizontal = 4.dp),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            AnimatedVisibility(
+                                visible = isSearchExpanded,
+                                enter = fadeIn(tween(220)) + expandHorizontally(
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioLowBouncy,
+                                        stiffness = Spring.StiffnessMediumLow
+                                    ),
+                                    expandFrom = Alignment.End
+                                ),
+                                exit = fadeOut(tween(160)) + shrinkHorizontally(
+                                    animationSpec = tween(200),
+                                    shrinkTowards = Alignment.End
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                OutlinedTextField(
+                                    value = quickAppSearchQuery,
+                                    onValueChange = { quickAppSearchQuery = it },
+                                    placeholder = {
+                                        Text(
+                                            text = "Search personal & work apps...",
+                                            color = Color.White.copy(alpha = 0.45f),
+                                            fontSize = 12.5.sp
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Search,
+                                            contentDescription = "Search",
+                                            tint = Color.White.copy(alpha = 0.7f),
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                    },
+                                    trailingIcon = {
+                                        if (quickAppSearchQuery.isNotEmpty()) {
+                                            IconButton(
+                                                onClick = { quickAppSearchQuery = "" },
+                                                modifier = Modifier.size(24.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Clear",
+                                                    tint = Color.White.copy(alpha = 0.7f),
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                            }
+                                        }
+                                    },
+                                    singleLine = true,
+                                    shape = CircleShape,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White,
+                                        focusedContainerColor = Color(0xFF161616),
+                                        unfocusedContainerColor = Color(0xFF141414),
+                                        focusedBorderColor = Color.White.copy(alpha = 0.55f),
+                                        unfocusedBorderColor = Color.White.copy(alpha = 0.2f),
+                                        cursorColor = Color.White
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp)
+                                        .padding(end = 8.dp)
+                                )
+                            }
 
-                        Spacer(modifier = Modifier.height(8.dp))
+                            // Floating Circular Search Button
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isSearchExpanded) Color.White else Color(0xFF1E1E1E))
+                                    .border(1.dp, Color.White.copy(alpha = 0.22f), CircleShape)
+                                    .clickable {
+                                        isSearchExpanded = !isSearchExpanded
+                                        if (!isSearchExpanded) {
+                                            quickAppSearchQuery = ""
+                                        }
+                                    }
+                            ) {
+                                Icon(
+                                    imageVector = if (isSearchExpanded) Icons.Default.Close else Icons.Default.Search,
+                                    contentDescription = "Toggle App Search",
+                                    tint = if (isSearchExpanded) Color.Black else Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
 
-                        // 4 Bottom Dock Icons (Items 1 to 4)
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // 4 Bottom Dock Icons (Dialer, Messages, World/Browser, Custom App)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1147,8 +1202,8 @@ fun LauncherScreen(activity: Activity) {
                                 openMessages(context)
                             }
 
-                            DockIconButton(icon = Icons.Default.Search, description = "Browser") {
-                                openBrowser(context)
+                            IconButton(onClick = { openBrowser(context) }) {
+                                WorldGlobeVectorIcon(tint = Color.White)
                             }
 
                             Box(
@@ -2041,14 +2096,14 @@ fun TimelineEventsList(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .weight(1f)
-                        .padding(vertical = 5.dp)
+                        .padding(vertical = 8.dp)
                         .clip(RoundedCornerShape(18.dp))
                         .background(Color(0xFF141414))
                         .combinedClickable(
                             onClick = { onToggleEventComplete(event) },
                             onLongClick = { onEditEvent(event) }
                         )
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .padding(horizontal = 18.dp, vertical = 15.dp)
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
@@ -2147,11 +2202,11 @@ fun TimelineEventsList(
                         Column(
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(vertical = 5.dp)
+                                .padding(vertical = 8.dp)
                                 .clip(RoundedCornerShape(18.dp))
                                 .background(Color(0xFF101010))
                                 .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(18.dp))
-                                .padding(14.dp)
+                                .padding(16.dp)
                         ) {
                             Text(
                                 text = "🕒 Free Time · $gapHours hrs",
@@ -2221,7 +2276,7 @@ fun MinimalTaskRow(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp)
+            .padding(vertical = 12.dp)
     ) {
         if (showDot) {
             Box(
@@ -2263,7 +2318,7 @@ fun MinimalTaskRow(
                 fontSize = 16.5.sp,
                 fontWeight = if (isWorkingTask) FontWeight.Bold else FontWeight.SemiBold
             )
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = subtitle,
                 color = if (isWorkingTask) Color.White.copy(alpha = 0.85f) else Color.White.copy(alpha = 0.5f),
@@ -2833,6 +2888,44 @@ fun AnalyticsVectorIcon(tint: Color) {
             color = tint,
             topLeft = Offset(w * 0.69f, h * 0.40f),
             size = Size(w * 0.16f, h * 0.50f)
+        )
+    }
+}
+
+@Composable
+fun WorldGlobeVectorIcon(tint: Color) {
+    Canvas(modifier = Modifier.size(24.dp)) {
+        val r = size.minDimension * 0.42f
+        val c = center
+        val stroke = Stroke(width = 1.6.dp.toPx())
+        // Outer circle
+        drawCircle(color = tint, radius = r, center = c, style = stroke)
+        // Horizontal equator line
+        drawLine(
+            color = tint,
+            start = Offset(c.x - r, c.y),
+            end = Offset(c.x + r, c.y),
+            strokeWidth = 1.4.dp.toPx()
+        )
+        // Upper & lower latitude arcs
+        drawLine(
+            color = tint,
+            start = Offset(c.x - r * 0.82f, c.y - r * 0.48f),
+            end = Offset(c.x + r * 0.82f, c.y - r * 0.48f),
+            strokeWidth = 1.2.dp.toPx()
+        )
+        drawLine(
+            color = tint,
+            start = Offset(c.x - r * 0.82f, c.y + r * 0.48f),
+            end = Offset(c.x + r * 0.82f, c.y + r * 0.48f),
+            strokeWidth = 1.2.dp.toPx()
+        )
+        // Vertical meridian ellipse (oval)
+        drawOval(
+            color = tint,
+            topLeft = Offset(c.x - r * 0.46f, c.y - r),
+            size = Size(r * 0.92f, r * 2f),
+            style = stroke
         )
     }
 }
